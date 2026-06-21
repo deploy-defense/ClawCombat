@@ -14,6 +14,7 @@ pub struct BattleLauncher {
     side_b_controls: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl BattleLauncher {
     pub fn new(map_name: &str, deployment: &PathBuf, side: &str) -> Result<Self> {
         let executable_path = current_exe().context("Retrieve current executable path")?;
@@ -25,8 +26,8 @@ impl BattleLauncher {
             map_name: map_name.to_string(),
             deployment: deployment.clone(),
             embedded_server: true,
-            server_rep_address: "tcp://0.0.0.0:4255".to_string(),
-            server_bind_address: "tcp://0.0.0.0:4256".to_string(),
+            server_rep_address: "tcp://127.0.0.1:4255".to_string(),
+            server_bind_address: "tcp://127.0.0.1:4256".to_string(),
             side: side.to_string(),
             side_a_controls: vec![],
             side_b_controls: vec![],

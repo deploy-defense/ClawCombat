@@ -23,6 +23,7 @@ impl Runner {
             let soldier = self.battle_state.soldier(soldier_index);
             let map = self.battle_state.map();
             if let Some(grid_path) = find_path(
+                &self.config,
                 map,
                 &map.grid_point_from_world_point(&soldier.world_point()),
                 &map.grid_point_from_world_point(&point),

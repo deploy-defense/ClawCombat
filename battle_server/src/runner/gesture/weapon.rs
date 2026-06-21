@@ -11,7 +11,7 @@ impl Runner {
         &'a self,
         soldier: &'a Soldier,
         _point: &WorldPoint,
-    ) -> Option<(WeaponClass, &Weapon)> {
+    ) -> Option<(WeaponClass, &'a Weapon)> {
         // TODO : according to distance, choose weapon
         soldier
             .main_weapon()
@@ -23,7 +23,7 @@ impl Runner {
         &'a self,
         soldier: &'a Soldier,
         weapon: &Weapon,
-    ) -> Option<&Magazine> {
+    ) -> Option<&'a Magazine> {
         soldier
             .magazines()
             .iter()

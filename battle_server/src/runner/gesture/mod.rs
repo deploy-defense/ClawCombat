@@ -5,7 +5,7 @@ use battle_core::{
     },
     entity::soldier::{Soldier, WeaponClass},
     game::{
-        weapon::{Shot, Weapon},
+        weapon::Weapon,
         Side,
     },
     physics::{

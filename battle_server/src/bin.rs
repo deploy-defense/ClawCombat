@@ -76,6 +76,7 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum Error {
     MapReaderError(MapReaderError),

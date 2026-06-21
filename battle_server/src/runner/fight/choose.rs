@@ -2,7 +2,7 @@ use rand::seq::SliceRandom;
 
 use battle_core::{
     entity::soldier::Soldier,
-    physics::{utils::distance_between_points, visibility::Visibility},
+    physics::utils::distance_between_points,
     state::battle::BattleState,
     types::{Distance, SoldierIndex, SquadUuid},
 };

@@ -179,9 +179,10 @@ impl Engine {
         let mut world_paths = vec![];
         for (bound_start, bound_end) in bounds {
             if let Some(grid_points_path) = find_path(
+                &battle_core::config::ServerConfig::default(),
                 self.battle_state.map(),
-                &bound_start,
                 &bound_end,
+                &bound_start,
                 true,
                 path_mode,
                 start_direction,

@@ -56,6 +56,7 @@ impl Display for EmbeddedServerError {
 
 pub struct EmbeddedServer {
     config: ServerConfig,
+    #[allow(dead_code)]
     resources: PathBuf,
     map_name: Option<String>,
     force_map: Option<Map>,

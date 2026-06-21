@@ -15,7 +15,7 @@ impl Runner {
         &'a self,
         soldier: &'a Soldier,
         point: &WorldPoint,
-    ) -> Option<(WeaponClass, &Weapon, Visibility)> {
+    ) -> Option<(WeaponClass, &'a Weapon, Visibility)> {
         let visibility = self.battle_state.point_is_visible_by_soldier(
             &self.config,
             soldier,

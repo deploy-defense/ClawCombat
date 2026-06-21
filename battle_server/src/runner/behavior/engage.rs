@@ -70,6 +70,7 @@ impl Runner {
                         )
                     {
                         if let Some(grid_points_path) = find_path(
+                            &self.config,
                             self.battle_state.map(),
                             &member_grid_point,
                             &new_grid_point,

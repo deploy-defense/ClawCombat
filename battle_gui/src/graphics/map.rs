@@ -1,7 +1,4 @@
-use std::{
-    any::Any,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use battle_core::{config::ServerConfig, map::Map, types::WorldPoint};
 use ggez::{
