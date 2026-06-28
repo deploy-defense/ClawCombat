@@ -31,6 +31,17 @@ Server must already been started
 
 
 
+
+#### Roadmap
+
+- 옵시디언 그래프 전환을 위한 로그 최적화
+- Yolo 모드에서 A,B side의 실내, 실외 Auto Pilot 전술 최적화
+- 프롬프트로 전술 적용
+- 전술 커스텀 매뉴얼(.md) 준비
+- 프롬프트 입력시 자동완성으로 각 분대별 상황에 적합한 커스텀 매뉴얼(.md) 불러오기
+- 다국어 NLP 가능한 모델 찾고, 싱글 페어 반영
+
+
 # Reference License
 This project integrates and extends the following open-source works:
 
