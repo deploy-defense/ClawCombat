@@ -30,7 +30,7 @@ fn load_system_korean_font() -> Vec<u8> {
         }
     }
     
-    include_bytes!("../../../resources/fonts/GowunBatang-Regular.ttf").to_vec()
+    panic!("시스템 폰트를 찾을 수 없습니다.");
 }
 
 impl Engine {
