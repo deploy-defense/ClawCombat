@@ -40,56 +40,59 @@ impl Painter {
 	}
 
 	pub fn update(&mut self, ctx: &mut ggez::Context, scale_factor: f32) {
-		// Create and free textures
-		while let Some(textures_delta) = self.textures_delta.pop_front() {
-			self.update_textures(ctx, textures_delta);
-		}
+        // Create and free textures
+        while let Some(textures_delta) = self.textures_delta.pop_front() {
+            self.update_textures(ctx, textures_delta);
+        }
 
-		// generating meshes
-		for egui::ClippedPrimitive {
-			primitive,
-			clip_rect,
-		} in self.shapes.iter()
-		{
-			match primitive {
-				egui::epaint::Primitive::Mesh(mesh) => {
-					if mesh.vertices.len() < 3 {
-						continue;
-					}
+        // generating meshes
+        for egui::ClippedPrimitive {
+            primitive,
+            clip_rect,
+        } in self.shapes.iter()
+        {
+            match primitive {
+                egui::epaint::Primitive::Mesh(mesh) => {
+                    if mesh.vertices.len() < 3 {
+                        continue;
+                    }
 
-					let vertices = mesh
-						.vertices
-						.iter()
-						.map(|v| graphics::Vertex {
-							position: [v.pos.x, v.pos.y],
-							uv: [v.uv.x, v.uv.y],
-							color: egui::Rgba::from(v.color).to_array(),
-						})
-						.collect::<Vec<_>>();
+                    let vertices = mesh
+                        .vertices
+                        .iter()
+                        .map(|v| graphics::Vertex {
+                            position: [v.pos.x, v.pos.y],
+                            uv: [v.uv.x, v.uv.y],
+                            color: egui::Rgba::from(v.color).to_array(),
+                        })
+                        .collect::<Vec<_>>();
 
-					self.paint_jobs.push((
-						mesh.texture_id,
-						graphics::Mesh::from_data(
-							ctx,
-							graphics::MeshData {
-								vertices: vertices.as_slice(),
-								indices: mesh.indices.as_slice(),
-							},
-						),
-						graphics::Rect::new(
-							clip_rect.min.x * scale_factor,
-							clip_rect.min.y * scale_factor,
-							(clip_rect.max.x - clip_rect.min.x) * scale_factor,
-							(clip_rect.max.y - clip_rect.min.y) * scale_factor,
-						),
-					));
-				}
-				egui::epaint::Primitive::Callback(_) => {
-					panic!("Custom rendering callbacks are not implemented yet");
-				}
-			}
-		}
-	}
+                    self.paint_jobs.push((
+                        mesh.texture_id,
+                        graphics::Mesh::from_data(
+                            ctx,
+                            graphics::MeshData {
+                                vertices: vertices.as_slice(),
+                                indices: mesh.indices.as_slice(),
+                            },
+                        ),
+                        graphics::Rect::new(
+                            clip_rect.min.x * scale_factor,
+                            clip_rect.min.y * scale_factor,
+                            (clip_rect.max.x - clip_rect.min.x) * scale_factor,
+                            (clip_rect.max.y - clip_rect.min.y) * scale_factor,
+                        ),
+                    ));
+                }
+                egui::epaint::Primitive::Callback(_) => {
+                    panic!("Custom rendering callbacks are not implemented yet");
+                }
+            }
+        }
+
+        // [추가] 다음 프레임의 UI 메쉬 누적(extend)을 위해, 이번 프레임에서 처리된 메쉬 목록을 비웁니다.
+        self.shapes.clear();
+    }
 
 	pub fn update_textures(
         &mut self,

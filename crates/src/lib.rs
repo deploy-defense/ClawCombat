@@ -29,18 +29,22 @@ impl Deref for GuiContext {
 }
 
 impl Drop for GuiContext {
-	fn drop(&mut self) {
-		let egui::FullOutput {
-			textures_delta,
-			shapes,
-			pixels_per_point,
-			..
-		} = self.context.end_frame();
+    fn drop(&mut self) {
+        let egui::FullOutput {
+            textures_delta,
+            shapes,
+            pixels_per_point,
+            ..
+        } = self.context.end_frame();
 
-		let mut painter = self.painter.lock().unwrap();
-		painter.shapes = self.context.tessellate(shapes, pixels_per_point);
-		painter.textures_delta.push_front(textures_delta);
-	}
+        let mut painter = self.painter.lock().unwrap();
+        // [수정] 여러 UI 컴포넌트가 동일 프레임에서 end_frame()을 발생시킬 때, 
+        // 기존 도형들이 덮어씌워져 유실되는 버그를 막기 위해 누적(extend) 처리합니다.
+        painter.shapes.extend(self.context.tessellate(shapes, pixels_per_point));
+        // [핵심 수정] 텍스처 델타가 LIFO(역순)로 처리되어, 
+        // Partial Update가 Full Update보다 먼저 실행되는 치명적 버그를 막기 위해 push_back으로 변경합니다.
+        painter.textures_delta.push_back(textures_delta);
+    }
 }
 
 /// Acts as an intermediary between [`ggez`] and [`egui`]

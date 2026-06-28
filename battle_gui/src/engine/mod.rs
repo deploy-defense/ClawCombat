@@ -160,7 +160,8 @@ impl Engine {
             panic!("시스템 한글 폰트를 찾을 수 없습니다.");
         }
 
-        let font_data = ggez::graphics::FontData::from_slice(font_bytes).unwrap();
+        // 라이프타임 에러(E0308) 해결: 동적 로드된 벡터의 소유권을 완전히 넘기는 from_vec 사용
+        let font_data = ggez::graphics::FontData::from_vec(font_bytes).unwrap();
         ctx.gfx.add_font("korean", font_data);
 
         Ok(engine)
