@@ -28,3 +28,12 @@ Server must already been started
 #### Gui with embedded server
 
     cargo run --bin battle_gui --release -- Demo1 assets/demo1_deployment.json --embedded-server --server-rep-address tcp://0.0.0.0:4255 --server-bind-address tcp://0.0.0.0:4256 --side a --side-a-control N --side-a-control NW --side-a-control W --side-b-control ALL
+
+
+
+# Reference License
+This project integrates and extends the following open-source works:
+[Game Engine](https://github.com/buxx/opencombat) - AGPL-3.0
+[Inference Engine](https://github.com/ruihe774/bonsai-pot) - Unlicense
+[Inference Model](https://huggingface.co/prism-ml/Bonsai-4B-gguf) - Apache-2.0
+[Embedding Model](https://huggingface.co/kekeappa/kor-static-embedding-512) - Apache-2.0
