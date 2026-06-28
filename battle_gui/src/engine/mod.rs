@@ -132,8 +132,35 @@ impl Engine {
         // [수정] 자체 인게임 오토마타를 사용하므로, 이벤트를 씹어먹는 OS 네이티브 IME는 강제로 꺼버립니다.
         ctx.gfx.window().set_ime_allowed(false);
 
-        // [추가] 네이티브 렌더링용 한글 폰트를 엔진 코어에 직접 등록합니다.
-        let font_data = ggez::graphics::FontData::from_slice(include_bytes!("../../../resources/fonts/GowunBatang-Regular.ttf")).unwrap();
+        // [추가] 네이티브 렌더링용 한글 폰트를 시스템 폰트로 동적 로드하여 엔진 코어에 등록합니다.
+        let font_paths = if cfg!(target_os = "windows") {
+            vec!["C:\\Windows\\Fonts\\malgun.ttf"]
+        } else if cfg!(target_os = "macos") {
+            vec![
+                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                "/Library/Fonts/AppleGothic.ttf",
+            ]
+        } else {
+            vec![
+                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            ]
+        };
+
+        let mut font_bytes = vec![];
+        for path in font_paths {
+            if let Ok(bytes) = std::fs::read(path) {
+                font_bytes = bytes;
+                break;
+            }
+        }
+        
+        if font_bytes.is_empty() {
+            panic!("시스템 한글 폰트를 찾을 수 없습니다.");
+        }
+
+        let font_data = ggez::graphics::FontData::from_slice(font_bytes).unwrap();
         ctx.gfx.add_font("korean", font_data);
 
         Ok(engine)
