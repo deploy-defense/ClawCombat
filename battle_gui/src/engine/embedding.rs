@@ -103,13 +103,42 @@ impl TacticManager {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        let id = Self::extract_yaml_field(&content, "id:").unwrap_or_else(|| path.file_stem().unwrap().to_string_lossy().to_string());
-                        let name = Self::extract_yaml_field(&content, "name:").unwrap_or_else(|| id.clone());
+                    match fs::read(&path) {
+                        Ok(bytes) => {
+                            // 1. BOM(Byte Order Mark) 스트립 처리
+                            let content_bytes = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                                &bytes[3..]
+                            } else {
+                                &bytes[..]
+                            };
 
-                        // TODO: 임베딩 텍스트 품질 향상을 위해 내용(Content) 요약 등 결합 고려. 현재는 name 기반으로 벡터화 진행
-                        if let Ok(embedding) = model.get_embedding(&name) {
-                            templates.push(TacticTemplate { id, name, embedding });
+                            // 2. UTF-8 디코딩 시도 및 에러 로깅
+                            match String::from_utf8(content_bytes.to_vec()) {
+                                Ok(content) => {
+                                    let id = Self::extract_yaml_field(&content, "id").unwrap_or_else(|| path.file_stem().unwrap().to_string_lossy().to_string());
+                                    
+                                    // 3. name 필드 유효성 검사 (빈 값 방어)
+                                    let mut name = Self::extract_yaml_field(&content, "name")
+                                        .or_else(|| Self::extract_markdown_h1(&content))
+                                        .unwrap_or_else(|| id.clone());
+                                        
+                                    if name.trim().is_empty() {
+                                        name = id.clone();
+                                    }
+
+                                    // 4. 임베딩 텍스트 품질 향상: 제목과 본문 내용을 결합하여 벡터화 진행
+                                    let combined_text = format!("{} {}", name, content);
+                                    if let Ok(embedding) = model.get_embedding(&combined_text) {
+                                        templates.push(TacticTemplate { id, name, embedding });
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("[System] UTF-8 디코딩 에러: {:?} (CP949 등 다른 인코딩으로 저장되었는지 확인하세요) - 원인: {}", path, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("[System] 파일을 읽을 수 없습니다: {:?} - 원인: {}", path, e);
                         }
                     }
                 }
@@ -137,10 +166,33 @@ impl TacticManager {
         results.into_iter().take(top_k).collect()
     }
 
-    fn extract_yaml_field(content: &str, field: &str) -> Option<String> {
+    fn extract_yaml_field(content: &str, field_key: &str) -> Option<String> {
+        let lower_key = field_key.to_lowercase();
+        content.lines().find_map(|line| {
+            let trimmed = line.trim();
+            let lower_line = trimmed.to_lowercase();
+            if lower_line.starts_with(&lower_key) {
+                if let Some(idx) = trimmed.find(':') {
+                    let value = trimmed[idx + 1..].trim().trim_matches('"').to_string();
+                    // Egui 렌더링 누락 방지: 보이지 않는 제어 문자(\r, \t 등) 완벽 제거
+                    let sanitized_value: String = value.chars().filter(|c| !c.is_control()).collect();
+                    if !sanitized_value.is_empty() {
+                        return Some(sanitized_value);
+                    }
+                }
+            }
+            None
+        })
+    }
+
+    fn extract_markdown_h1(content: &str) -> Option<String> {
         content.lines()
-            .find(|line| line.trim().starts_with(field))
-            .map(|line| line.trim().trim_start_matches(field).trim().trim_matches('"').to_string())
+            .find(|line| line.trim().starts_with("# "))
+            .map(|line| {
+                let value = line.trim().trim_start_matches("# ").trim().to_string();
+                // Egui 렌더링 누락 방지: 보이지 않는 제어 문자(\r, \t 등) 완벽 제거
+                value.chars().filter(|c| !c.is_control()).collect()
+            })
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

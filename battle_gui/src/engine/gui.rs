@@ -8,6 +8,31 @@ use super::{message::{EngineMessage, GuiStateMessage}, Engine};
 
 pub const EGUI_SCALE: f32 = 1.5;
 
+fn load_system_korean_font() -> Vec<u8> {
+    let paths = if cfg!(target_os = "windows") {
+        vec!["C:\\Windows\\Fonts\\malgun.ttf"]
+    } else if cfg!(target_os = "macos") {
+        vec![
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+            "/Library/Fonts/AppleGothic.ttf",
+        ]
+    } else {
+        vec![
+            "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        ]
+    };
+
+    for path in paths {
+        if let Ok(bytes) = std::fs::read(path) {
+            return bytes;
+        }
+    }
+    
+    include_bytes!("../../../resources/fonts/GowunBatang-Regular.ttf").to_vec()
+}
+
 impl Engine {
     pub fn draw_egui(&mut self, _ctx: &mut Context, canvas: &mut Canvas) {
         canvas.draw(
@@ -34,17 +59,41 @@ impl Engine {
 
         if needs_font_init {
             let mut fonts = ggegui::egui::FontDefinitions::default();
+            
+            // 1. 운영체제(OS)별 자체 한글 폰트 동적 로드 (실패 시 내장 폰트 Fallback)
             fonts.font_data.insert(
                 "korean_font".to_owned(),
-                ggegui::egui::FontData::from_static(include_bytes!("../../../resources/fonts/GowunBatang-Regular.ttf")),
+                ggegui::egui::FontData::from_owned(load_system_korean_font()),
             );
+
+            // 2. Proportional 및 Monospace 모두 한글 폰트를 최우선(0순위)으로 강제 할당
             fonts.families.get_mut(&ggegui::egui::FontFamily::Proportional)
                 .unwrap()
                 .insert(0, "korean_font".to_owned());
             fonts.families.get_mut(&ggegui::egui::FontFamily::Monospace)
                 .unwrap()
-                .push("korean_font".to_owned());
+                .insert(0, "korean_font".to_owned());
+            
             egui_ctx.set_fonts(fonts);
+
+            // 3. 글로벌 텍스트 스타일 덮어쓰기 (모든 스타일을 안전한 Proportional/Monospace로 롤백)
+            let mut style = (*egui_ctx.style()).clone();
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Heading) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Body) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Monospace) {
+                text_style.family = ggegui::egui::FontFamily::Monospace;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Button) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Small) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            egui_ctx.set_style(style);
 
             egui_ctx.memory_mut(|mem| {
                 mem.data.insert_temp(ggegui::egui::Id::new("korean_font_loaded"), true);
@@ -158,17 +207,41 @@ impl Engine {
 
         if needs_font_init {
             let mut fonts = ggegui::egui::FontDefinitions::default();
+            
+            // 1. 운영체제(OS)별 자체 한글 폰트 동적 로드 (실패 시 내장 폰트 Fallback)
             fonts.font_data.insert(
                 "korean_font".to_owned(),
-                ggegui::egui::FontData::from_static(include_bytes!("../../../resources/fonts/GowunBatang-Regular.ttf")),
+                ggegui::egui::FontData::from_owned(load_system_korean_font()),
             );
+
+            // 2. Proportional 및 Monospace 모두 한글 폰트를 최우선(0순위)으로 강제 할당
             fonts.families.get_mut(&ggegui::egui::FontFamily::Proportional)
                 .unwrap()
                 .insert(0, "korean_font".to_owned());
             fonts.families.get_mut(&ggegui::egui::FontFamily::Monospace)
                 .unwrap()
-                .push("korean_font".to_owned());
+                .insert(0, "korean_font".to_owned());
+            
             egui_ctx.set_fonts(fonts);
+
+            // 3. 글로벌 텍스트 스타일 덮어쓰기 (모든 스타일을 안전한 Proportional/Monospace로 롤백)
+            let mut style = (*egui_ctx.style()).clone();
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Heading) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Body) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Monospace) {
+                text_style.family = ggegui::egui::FontFamily::Monospace;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Button) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Small) {
+                text_style.family = ggegui::egui::FontFamily::Proportional;
+            }
+            egui_ctx.set_style(style);
 
             egui_ctx.memory_mut(|mem| {
                 mem.data.insert_temp(ggegui::egui::Id::new("korean_font_loaded"), true);

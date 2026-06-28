@@ -34,9 +34,16 @@ impl HangulAutomata {
         }
     }
 
-    pub fn toggle_mode(&mut self) {
+    pub fn toggle_mode(&mut self, buffer: &mut String) {
+        self.force_commit(buffer);
         self.is_korean_mode = !self.is_korean_mode;
-        self.clear();
+    }
+
+    pub fn force_commit(&mut self, buffer: &mut String) {
+        if self.is_composing() {
+            buffer.push(self.get_composed_char());
+            self.clear();
+        }
     }
 
     pub fn is_composing(&self) -> bool {
@@ -50,7 +57,7 @@ impl HangulAutomata {
     }
 
     /// 현재 조합 중인 상태를 지우고 버퍼에서 한 글자를 뺍니다.
-    pub fn handle_backspace(&mut self, buffer: &mut String) -> bool {
+    pub fn handle_backspace(&mut self, _buffer: &mut String) -> bool {
         if !self.is_composing() {
             return false; // 조합 중인 글자가 없으면 Egui 기본 백스페이스로 넘김
         }
@@ -68,10 +75,7 @@ impl HangulAutomata {
             self.cho = None;
         }
 
-        buffer.pop(); // 기존 글자 지우기
-        if self.is_composing() {
-            buffer.push(self.get_composed_char()); // 분해된 글자 다시 그리기
-        }
+        // 입력 버퍼와 렌더링 버퍼가 분리되었으므로, 여기서 buffer.pop()을 하지 않습니다.
         true
     }
 
@@ -98,7 +102,7 @@ impl HangulAutomata {
             Some(v) => v,
             None => {
                 // 한글 맵핑이 안 되는 키(숫자, 기호 등)가 들어오면 현재 조합을 확정(Commit)
-                self.clear();
+                self.force_commit(buffer);
                 return false;
             }
         };
@@ -106,10 +110,7 @@ impl HangulAutomata {
         let is_vowel = mapped.0;
         let index = mapped.1;
 
-        // 이미 조합 중인 글자가 화면에 떠 있으면 지우고 다시 렌더링하기 위해 버퍼를 조작
-        if self.is_composing() {
-            buffer.pop();
-        }
+        // 이미 조합 중인 글자를 pop 하던 시각적 렌더링 깜빡임 방어 로직 제거 (Preedit 분리)
 
         if is_vowel {
             // 모음 입력 처리
@@ -191,10 +192,7 @@ impl HangulAutomata {
             }
         }
 
-        // 조합된 글자를 다시 Egui 버퍼 맨 끝에 그려줌 (Preedit 시각화)
-        if self.is_composing() {
-            buffer.push(self.get_composed_char());
-        }
+        // 조합 중인 글자를 버퍼에 밀어넣는 코드 삭제 (화면 깜빡임 방지용 Preedit 분리)
 
         true
     }

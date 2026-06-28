@@ -244,7 +244,12 @@ impl EventHandler<ggez::GameError> for Engine {
             canvas.draw(&bg_mesh, ggez::graphics::DrawParam::default());
             let cursor_char = if self.gui_state.frame_i() % 60 < 30 { "_" } else { "" };
             let mode_text = if self.hangul_ime.is_korean_mode { "[한]" } else { "[영]" };
-            let display_text = format!("{} {}{}", mode_text, self.gui_state.chat_input(), cursor_char);
+            let preedit_char = if self.hangul_ime.is_composing() {
+                self.hangul_ime.get_composed_char().to_string()
+            } else {
+                "".to_string()
+            };
+            let display_text = format!("{} {}{}{}", mode_text, self.gui_state.chat_input(), preedit_char, cursor_char);
             let mut text = ggez::graphics::Text::new(display_text);
             text.set_font("korean").set_scale(24.0);
             canvas.draw(
@@ -424,7 +429,7 @@ impl EventHandler<ggez::GameError> for Engine {
                 
                 // 한/영 전환 토글 (우측 Alt 또는 RWin/Kana 키 사용)
                 if keycode == ggez::winit::event::VirtualKeyCode::RAlt || keycode == ggez::winit::event::VirtualKeyCode::Kana {
-                    self.hangul_ime.toggle_mode();
+                    self.hangul_ime.toggle_mode(self.gui_state.chat_input_mut());
                     println!("[IME] Korean Mode: {}", self.hangul_ime.is_korean_mode);
                     return GameResult::Ok(());
                 }
@@ -445,7 +450,7 @@ impl EventHandler<ggez::GameError> for Engine {
 
                 // 스페이스바 처리
                 if keycode == ggez::winit::event::VirtualKeyCode::Space {
-                    self.hangul_ime.clear();
+                    self.hangul_ime.force_commit(self.gui_state.chat_input_mut());
                     self.gui_state.chat_input_mut().push(' ');
                     let query = self.gui_state.chat_input().to_string();
                     self.react(vec![EngineMessage::RequestTacticSuggestions(query)], ctx)?;
@@ -454,7 +459,7 @@ impl EventHandler<ggez::GameError> for Engine {
                 
                 // 엔터키 처리 (LLM에 명령어 전송)
                 if keycode == ggez::winit::event::VirtualKeyCode::Return || keycode == ggez::winit::event::VirtualKeyCode::NumpadEnter {
-                    self.hangul_ime.clear();
+                    self.hangul_ime.force_commit(self.gui_state.chat_input_mut());
                     let cmd = self.gui_state.chat_input().to_string();
                     if !cmd.trim().is_empty() {
                         let messages = vec![EngineMessage::SendChatCommand(cmd)];
