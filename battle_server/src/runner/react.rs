@@ -307,6 +307,21 @@ impl Runner {
                                 logger.log_ammo(side, count);
                             }
                         }
+                        battle_core::state::battle::message::BattleStateMessage::Soldier(idx, battle_core::state::battle::message::SoldierMessage::ReplenishAmmunition) => {
+                            // 보급 완료 로깅을 이곳에서 처리 (가변 참조자 충돌 방지)
+                            let threat_before = *self.battle_state.soldier(*idx).under_fire().value() as f32 / 200.0;
+                            let threat_after = (threat_before - 1.0).max(0.0); // RelieveStress(200) 예정이므로 0.0으로 수렴
+                            if let Some(logger) = &mut self.logger {
+                                logger.log_support_supply(
+                                    current_frame,
+                                    idx.0,
+                                    30,
+                                    200,
+                                    threat_before,
+                                    threat_after,
+                                );
+                            }
+                        }
                         battle_core::state::battle::message::BattleStateMessage::PushBulletFire(ref bullet_fire) => {
                             // [Step 1: Tactical Ping] 총격 발생 시 해당 발포 원점을 30초간(1800프레임) 위험 지역으로 기억합니다.
                             let map = self.battle_state.map();

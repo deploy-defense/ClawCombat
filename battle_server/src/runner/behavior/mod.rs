@@ -665,19 +665,25 @@ impl Runner {
                 let map = self.battle_state.map();
                 if let Some(cp) = self.checkpoints.read().unwrap().get(&soldier.squad_uuid()) {
                     let dist_to_cp = battle_core::physics::utils::distance_between_points(&soldier.world_point(), cp).meters();
+                    let threat_before = *soldier.under_fire().value() as f32 / 200.0;
+                    let current_frame = *self.battle_state.frame_i();
                     
                     // 체크포인트 반경 5m 이내에 도달하면 탄약(수류탄 포함) 즉시 보급 및 안도감(스트레스 완화)
                     if dist_to_cp <= 5 {
                         // [Part 2: 탄약고 보급 체류(Delay) 로직 도입]
                         // 보급소에 도달하면 즉시 튕겨나가지 않고, 약 3초(180프레임)간 재장전 모션(Reloading)을 취하며 재정비합니다.
-                        messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
-                            soldier.uuid(),
-                            SoldierMessage::ReplenishAmmunition
-                        )));
-                        messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
-                            soldier.uuid(),
-                            SoldierMessage::RelieveStress(200)
-                        )));
+                        messages.push(RunnerMessage::BattleState(
+                            BattleStateMessage::Soldier(
+                                soldier.uuid(),
+                                SoldierMessage::ReplenishAmmunition
+                            )
+                        ));
+                        messages.push(RunnerMessage::BattleState(
+                            BattleStateMessage::Soldier(
+                                soldier.uuid(),
+                                SoldierMessage::RelieveStress(200)
+                            )
+                        ));
                         
                         let reload_end_frame = *self.battle_state.frame_i() + 180;
                         messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(

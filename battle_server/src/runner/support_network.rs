@@ -529,6 +529,39 @@ impl Runner {
                             ammo_state
                         );
                     }
+
+                    // 로거에 지원 요청 기록
+                    if let Some(logger) = &mut self.logger {
+                        let target_pos = if let Some((pos, _)) = self.get_engagement_target_info(squad_uuid) {
+                            pos
+                        } else {
+                            target_position
+                        };
+                        logger.log_support_request(
+                            current_frame,
+                            squad_uuid.0,
+                            threat_level,
+                            &format!("{:?}", urgency),
+                            None,
+                            &target_pos,
+                        );
+                    }
+                    // 로거에 지원 요청 기록
+                    if let Some(logger) = &mut self.logger {
+                        let target_pos = if let Some((pos, _)) = self.get_engagement_target_info(squad_uuid) {
+                            pos
+                        } else {
+                            target_position
+                        };
+                        logger.log_support_request(
+                            current_frame,
+                            squad_uuid.0,
+                            threat_level,
+                            &format!("{:?}", urgency),
+                            None,
+                            &target_pos,
+                        );
+                    }
                 }
             }
         }
@@ -703,6 +736,23 @@ impl Runner {
                         );
                     }
 
+                    // 로거에 지원 할당 기록
+                    if let Some(logger) = &mut self.logger {
+                        let safe_pos = self.calculate_safe_support_position(
+                            &self.battle_state.soldier(
+                                self.battle_state.squad(supporter_squad).leader()
+                            ).world_point(),
+                            &request.target_position
+                        );
+                        logger.log_support_assignment(
+                            current_frame,
+                            requester_squad.0,
+                            supporter_squad.0,
+                            "Moving",
+                            &safe_pos,
+                        );
+                    }
+
                     break;
                 }
 
@@ -721,7 +771,7 @@ impl Runner {
         messages
     }
 
-    fn calculate_safe_support_position(&self, from_point: &WorldPoint, target_point: &WorldPoint) -> WorldPoint {
+    pub fn calculate_safe_support_position(&self, from_point: &WorldPoint, target_point: &WorldPoint) -> WorldPoint {
         let from_vec = from_point.to_vec2();
         let target_vec = target_point.to_vec2();
 
@@ -1050,7 +1100,7 @@ impl Runner {
         messages
     }
 
-    fn get_engagement_target_info(&self, squad_uuid: &SquadUuid) -> Option<(WorldPoint, Option<SquadUuid>)> {
+    pub fn get_engagement_target_info(&self, squad_uuid: &SquadUuid) -> Option<(WorldPoint, Option<SquadUuid>)> {
         let squad = self.battle_state.squad(*squad_uuid);
         let leader = self.battle_state.soldier(squad.leader());
 
@@ -1275,9 +1325,7 @@ impl Runner {
         self.issue_safe_support_order(supporter_squad, request, safe_position, current_frame)
     }
 
-    fn calculate_support_position(&self, from_point: &WorldPoint, target_point: &WorldPoint) -> WorldPoint {
-        self.calculate_safe_support_position(from_point, target_point)
-    }
+    
 
     fn update_supporting_squads(&mut self, current_frame: u64) -> Vec<RunnerMessage> {
         let mut messages = vec![];

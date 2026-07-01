@@ -2,8 +2,7 @@ use battle_core::{
     behavior::Behavior,
     entity::{soldier::Soldier, vehicle::OnBoardPlace},
     order::Order,
-    physics::path::{find_tactical_path, PathMode, Direction},
-    types::{SquadUuid, WorldPath, WorldPaths},
+    types::SquadUuid,
 };
 
 use crate::runner::Runner;
