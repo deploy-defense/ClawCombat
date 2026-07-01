@@ -25,7 +25,7 @@ keyframe_derive = "1.0.0"
 strum = "0.24"
 strum_macros = "0.24"
 geo = "0.27.0"
-ggegui = { path = "../crates" }
+ggegui = { path = "../crates/ggegui" }
 puffin_http = "0.16.0"
 puffin = "0.19.0"
 image = "0.24.5"
