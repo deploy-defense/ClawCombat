@@ -18,16 +18,57 @@ impl Runner {
             let mut new_ownerships = vec![];
             let mut messages = vec![];
             
+            let current_frame = *self.battle_state.frame_i();
+            let mut flag_capture_data = self.flag_capture_data.write().unwrap();
+            let mut flag_cooldown_data = self.flag_cooldown_data.write().unwrap();
+
+            // 만료된 쿨다운 삭제 (예: 60초 = 3600프레임 후 쿨다운 해제)
+            flag_cooldown_data.retain(|_, (expire_frame, _)| *expire_frame > current_frame);
+
             for (flag_name, ownership) in self.battle_state.flags().ownerships() {
                 let flag = self.battle_state.map().flag(flag_name);
-                let a_inside = self
-                    .battle_state
-                    .there_is_side_soldier_in(&Side::A, flag.shape());
-                let b_inside = self
-                    .battle_state
-                    .there_is_side_soldier_in(&Side::B, flag.shape());
+                
+                // 분대별 점령 식별 및 쿨다운 필터링
+                let mut a_squads_inside = vec![];
+                let mut b_squads_inside = vec![];
+                for s in self.battle_state.soldiers() {
+                    if s.can_take_flag() && flag.shape().contains(&s.world_point()) {
+                        if s.side() == &Side::A {
+                            a_squads_inside.push(s.squad_uuid());
+                        } else if s.side() == &Side::B {
+                            b_squads_inside.push(s.squad_uuid());
+                        }
+                    }
+                }
 
-                let new_ownership = match (ownership, a_inside, b_inside) {
+                // 쿨다운에 걸린 분대는 점령에 기여할 수 없음 (무시)
+                a_squads_inside.retain(|sq| {
+                    if let Some((expire_frame, cooled_sq)) = flag_cooldown_data.get(&flag_name.0) {
+                        if *expire_frame > current_frame && sq == cooled_sq {
+                            false // 아직 쿨다운 중인 분대는 제외
+                        } else {
+                            true // 쿨다운이 만료되었거나 다른 분대는 통과
+                        }
+                    } else {
+                        true
+                    }
+                });
+                b_squads_inside.retain(|sq| {
+                    if let Some((expire_frame, cooled_sq)) = flag_cooldown_data.get(&flag_name.0) {
+                        if *expire_frame > current_frame && sq == cooled_sq {
+                            false // 아직 쿨다운 중인 분대는 제외
+                        } else {
+                            true // 쿨다운이 만료되었거나 다른 분대는 통과
+                        }
+                    } else {
+                        true
+                    }
+                });
+
+                let a_inside = !a_squads_inside.is_empty();
+                let b_inside = !b_squads_inside.is_empty();
+
+                let mut new_ownership = match (ownership, a_inside, b_inside) {
                     (FlagOwnership::Nobody, true, true) => FlagOwnership::Both,
                     (FlagOwnership::Nobody, true, false) => FlagOwnership::A,
                     (FlagOwnership::Nobody, false, true) => FlagOwnership::B,
@@ -46,8 +87,176 @@ impl Runner {
                     (FlagOwnership::Both, false, false) => FlagOwnership::Both,
                 };
 
+                // 점령 시간 추적 및 자동 해제 로직
+                if new_ownership == FlagOwnership::A || new_ownership == FlagOwnership::B {
+                    let capturing_squad = if new_ownership == FlagOwnership::A {
+                        a_squads_inside.first().copied()
+                    } else {
+                        b_squads_inside.first().copied()
+                    };
+
+                    // [수정] 깃발 내부에 병사가 없더라도, 한 번 점령된 깃발은 타이머가 계속 돌아가서 일정 시간 뒤에 자연스럽게 해제되게 합니다.
+                    let fallback_sq = battle_core::types::SquadUuid(0);
+                    let active_sq = capturing_squad.unwrap_or(fallback_sq);
+
+                    let entry = flag_capture_data.entry(flag_name.0.clone()).or_insert((current_frame, active_sq));
+                    
+                    // 만약 새로운 병사(분대)가 들어왔고, 기존 점령 분대와 다르면 타이머 리셋
+                    if capturing_squad.is_some() && entry.1 != active_sq && entry.1 != fallback_sq {
+                        *entry = (current_frame, active_sq);
+                    } else if entry.1 == fallback_sq && capturing_squad.is_some() {
+                        *entry = (current_frame, active_sq);
+                    }
+
+                    let duration = current_frame.saturating_sub(entry.0);
+                    if duration >= 1800 { // 30초 초과 시 자동 해제
+                        let sq = entry.1;
+                        // 구조체에 존재하지 않는 name() 메서드 대신, 고유 UUID 인덱스 번호를 조합하여 컴파일 에러가 없는 명확한 분대명 문자열 생성
+                        let squad_name_str = format!("Squad_{}", sq.0);
+                        
+                        println!("[거점 순환 자연 해제] 거점 [{}]의 소유권이 30초 점유 시간 경과로 자연스럽게 중립화됩니다. (해제된 분대명: {})", flag_name.0, squad_name_str);
+                        new_ownership = FlagOwnership::Nobody;
+                        
+                        // [주홍글씨 로직 반영] 동일한 분대가 다시는 이 flag를 점령할 수 없도록 만료 제한 시간을 u64::MAX로 설정하여 영구 차단
+                        flag_cooldown_data.insert(flag_name.0.clone(), (u64::MAX, sq));
+                        flag_capture_data.remove(&flag_name.0);
+
+                        // 무조건 해당 공간을 나가 다른 해제되거나 점령 가능한 flag를 찾아 기동하도록 처리
+                        if sq != fallback_sq {
+                            if let Some(squad) = self.battle_state.squads().get(&sq) {
+                                let leader_idx = squad.leader();
+                                let leader = self.battle_state.soldier(leader_idx);
+                                let is_side_a = leader.side() == &Side::A;
+                                let is_side_b = leader.side() == &Side::B;
+                                
+                                // 맵 상의 깃발 중 해당 분대가 새로 기동해 들어갈 수 있는(주홍글씨 영구 제한에 걸리지 않고 아군 소유가 아닌) 타겟 깃발 탐색
+                                let map = self.battle_state.map();
+                                let mut next_target_flag = None;
+                                let mut min_distance = std::f32::MAX;
+                                
+                                for alternative_flag in map.flags() {
+                                    // 현재 해제된 이 거점 자체는 주홍글씨 데이터에 u64::MAX로 방금 주입되었으므로 검사 과정에서 자연스럽게 제외됨
+                                    let is_alternative_cooldown = if let Some((_, cooled_sq)) = flag_cooldown_data.get(&alternative_flag.name().0) {
+                                        *cooled_sq == sq
+                                    } else {
+                                        false
+                                    };
+                                    if is_alternative_cooldown {
+                                        continue;
+                                    }
+                                    
+                                    // 이미 아군 진영이 점령 완료한 거점인지 여부 검사
+                                    let is_already_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
+                                        n == alternative_flag.name() && (
+                                            o == &FlagOwnership::Both || 
+                                            (is_side_a && o == &FlagOwnership::A) ||
+                                            (is_side_b && o == &FlagOwnership::B)
+                                        )
+                                    });
+                                    
+                                    if !is_already_owned {
+                                        let dist = battle_core::physics::utils::distance_between_points(&leader.world_point(), &alternative_flag.position()).meters() as f32;
+                                        if dist < min_distance {
+                                            min_distance = dist;
+                                            next_target_flag = Some(alternative_flag.clone());
+                                        }
+                                    }
+                                }
+                                
+                                // 새로 진격할 대상 거점을 성공적으로 식별한 경우 A* 경로를 주입하여 즉시 출격
+                                if let Some(target_flag_found) = next_target_flag {
+                                    let from_grid = map.grid_point_from_world_point(&leader.world_point());
+                                    let to_grid = map.grid_point_from_world_point(&target_flag_found.position());
+                                    
+                                    if from_grid != to_grid {
+                                        if let Some(grid_path) = battle_core::physics::path::find_path(
+                                            &self.config,
+                                            map,
+                                            &from_grid,
+                                            &to_grid,
+                                            true,
+                                            &battle_core::physics::path::PathMode::Walk,
+                                            &Some(battle_core::physics::path::Direction::from_angle(&leader.get_looking_direction())),
+                                        ) {
+                                            let world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
+                                            let world_paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(world_path)]);
+                                            
+                                            // 거점 탈환을 위한 신속 기동 명령 생성 및 최종 도달 시 방어 태세 전환 예약 설정
+                                            let final_move_order = Order::MoveFastTo(world_paths.clone(), Some(Box::new(Order::Defend(battle_core::types::Angle(0.0)))));
+                                            
+                                            println!("[거점 이탈 및 진격] 분대 {}가 해제된 구역을 탈출하여 새로운 거점 [{}] 확보를 위해 전속력으로 이동합니다.", squad_name_str, target_flag_found.name().0);
+                                            
+                                            // 분대가 포복(crawling) 상태에 빠지지 않고 확실히 전속력 런(fast move)을 실행할 수 있도록 분대원 전체의 오더와 행동 상태를 동시에 개편 주입
+                                            for member_idx in squad.members() {
+                                                messages.push(RunnerMessage::BattleState(
+                                                    BattleStateMessage::Soldier(
+                                                        *member_idx,
+                                                        SoldierMessage::SetOrder(final_move_order.clone()),
+                                                    )
+                                                ));
+                                                messages.push(RunnerMessage::BattleState(
+                                                    BattleStateMessage::Soldier(
+                                                        *member_idx,
+                                                        SoldierMessage::SetBehavior(Behavior::MoveFastTo(world_paths.clone())),
+                                                    )
+                                                ));
+                                                messages.push(RunnerMessage::BattleState(
+                                                    BattleStateMessage::Soldier(
+                                                        *member_idx,
+                                                        SoldierMessage::SetGesture(battle_core::behavior::gesture::Gesture::Idle),
+                                                    )
+                                                ));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // 맵 상에 갈 수 있는 중립/적 거점이 전혀 없는 극한의 예외 케이스인 경우에만 기존 대기 오더 폴백 적용
+                                    for member_idx in squad.members() {
+                                        messages.push(RunnerMessage::BattleState(
+                                            BattleStateMessage::Soldier(
+                                                *member_idx,
+                                                SoldierMessage::SetOrder(Order::Idle),
+                                            )
+                                        ));
+                                        messages.push(RunnerMessage::BattleState(
+                                            BattleStateMessage::Soldier(
+                                                *member_idx,
+                                                SoldierMessage::SetBehavior(Behavior::Idle(Body::Crouched)),
+                                            )
+                                        ));
+                                        messages.push(RunnerMessage::BattleState(
+                                            BattleStateMessage::Soldier(
+                                                *member_idx,
+                                                SoldierMessage::SetGesture(battle_core::behavior::gesture::Gesture::Idle),
+                                            )
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    flag_capture_data.remove(&flag_name.0);
+                }
+
                 if ownership != &new_ownership {
+                    // 소유권이 변경되었을 때, 쿨다운 중이던 깃발을 다른 분대나 적이 점유했는지 확인하여 쿨다운 해제
                     if new_ownership == FlagOwnership::A || new_ownership == FlagOwnership::B {
+                        let capturing_squad = if new_ownership == FlagOwnership::A {
+                            a_squads_inside.first().copied()
+                        } else {
+                            b_squads_inside.first().copied()
+                        };
+
+                        if let Some(sq) = capturing_squad {
+                            if let Some((_, cooled_sq)) = flag_cooldown_data.get(&flag_name.0) {
+                                if *cooled_sq != sq {
+                                    println!("[거점 순환 쿨다운 해제] 거점 [{}]가 다른 분대/진영에 의해 점유되어 기존 쿨다운이 해제됩니다.", flag_name.0);
+                                    flag_cooldown_data.remove(&flag_name.0);
+                                }
+                            }
+                        }
+
                         let capturing_side = if new_ownership == FlagOwnership::A { Side::A } else { Side::B };
                         for soldier in self.battle_state.soldiers() {
                             if soldier.side() == &capturing_side && soldier.alive() {

@@ -83,6 +83,9 @@ pub struct Runner {
     pub scout_turn_offsets: std::sync::RwLock<std::collections::HashMap<String, (usize, u64)>>,
     // [강제 로테이션 이력 스토리지] 중대별로 이미 정찰조 임무를 수행한 분대 리스트를 기억하여 독점을 원천 차단합니다.
     pub scouted_history: std::sync::RwLock<std::collections::HashMap<String, std::collections::HashSet<battle_core::types::SquadUuid>>>,
+    // [거점 순환 강제 해제 메모리]
+    pub flag_capture_data: std::sync::RwLock<std::collections::HashMap<String, (u64, battle_core::types::SquadUuid)>>,
+    pub flag_cooldown_data: std::sync::RwLock<std::collections::HashMap<String, (u64, battle_core::types::SquadUuid)>>,
     // 비동기 LLM 전술 요청 전송 채널
     pub async_llm_sender: Sender<AsyncTacticRequest>,
     // 비동기 LLM 결과 수신 채널
@@ -168,6 +171,8 @@ impl Runner {
             checkpoints: std::sync::RwLock::new(std::collections::HashMap::new()),
             scout_turn_offsets: std::sync::RwLock::new(std::collections::HashMap::new()),
             scouted_history: std::sync::RwLock::new(std::collections::HashMap::new()),
+            flag_capture_data: std::sync::RwLock::new(std::collections::HashMap::new()),
+            flag_cooldown_data: std::sync::RwLock::new(std::collections::HashMap::new()),
             async_llm_sender: req_tx,
             async_llm_receiver: res_rx,
         }
