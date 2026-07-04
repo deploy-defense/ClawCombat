@@ -496,8 +496,27 @@ impl GuiState {
                 self.tactic_suggestions = suggestions.clone();
             }
             GuiStateMessage::AddChatTask(command, squads) => {
-                self.chat_task_counter += 1;
-                self.chat_tasks.push((self.chat_task_counter, command.clone(), squads.clone()));
+                // [수정] 동일한 명령(command)이 이미 존재한다면, 새 분대들을 기존 대기열에 병합(Append)합니다.
+                let mut found = false;
+                for (_, existing_cmd, existing_squads) in &mut self.chat_tasks {
+                    if existing_cmd == command {
+                        for sq in squads.iter() {
+                            if !existing_squads.contains(sq) {
+                                existing_squads.push(*sq);
+                            }
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if !found {
+                    self.chat_task_counter += 1;
+                    self.chat_tasks.push((self.chat_task_counter, command.clone(), squads.clone()));
+                }
+
+                // Task 추가 시 Task UI가 자동으로 보이도록 설정
+                self.display_task_gui = true;
             }
             GuiStateMessage::RemoveChatTask(id) => {
                 // [수정] 특정 ID를 가진 Task만 제거

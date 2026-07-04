@@ -108,15 +108,24 @@ impl Engine {
                         }
                     }
                     if target_squads.is_empty() {
-                        for squad_uuid in self.battle_state.squads().keys() {
-                            let leader_idx = self.battle_state.squad(*squad_uuid).leader();
-                            if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
-                                target_squads.push(*squad_uuid);
+                        // 현재 선택된 분대 우선
+                        let selected = self.gui_state.selected_squads();
+                        if !selected.1.is_empty() {
+                            target_squads = selected.1.clone();
+                        } else {
+                            for squad_uuid in self.battle_state.squads().keys() {
+                                let leader_idx = self.battle_state.squad(*squad_uuid).leader();
+                                if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
+                                    target_squads.push(*squad_uuid);
+                                }
                             }
                         }
                     }
                     
-                    self.gui_state.react(&GuiStateMessage::AddChatTask(command.clone(), target_squads), ctx);
+                    // [수정] Task 중복 확인 로직을 상태 관리(state.rs) 내부의 병합(Append) 로직으로 위임하고 무조건 이벤트를 발송합니다.
+                    if !target_squads.is_empty() {
+                        self.gui_state.react(&GuiStateMessage::AddChatTask(command.clone(), target_squads), ctx);
+                    }
 
                     if let Err(error) = self.output.send(vec![InputMessage::ChatCommand(command)]) {
                         eprintln!("Error when try to send chat command to server : {}", error);

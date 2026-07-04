@@ -58,10 +58,12 @@ impl Engine {
         let egui_ctx = self.egui_backend.inner.ctx();
         let mut messages = vec![];
 
+        let max_height = (ctx.gfx.drawable_size().1 / EGUI_SCALE) - 300.0;
         egui::Window::new("Debug")
             .anchor(Align2::LEFT_TOP, Vec2::new(0., 0.))
+            .max_height(max_height) // 윈도우 프레임 자체의 최대 높이를 강제로 제한하여 클릭 가로채기 방지
             .show(&egui_ctx, |ui| {
-                ScrollArea::vertical().show(ui, |ui| {
+                ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
                     messages.extend(self.debug_gui_header(ctx, &egui_ctx, ui));
                     messages.extend(self.debug_gui_body(ctx, &egui_ctx, ui));
                 })

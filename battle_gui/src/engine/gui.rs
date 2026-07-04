@@ -129,6 +129,40 @@ impl Engine {
                                 } else {
                                     format!("{} {}", current_chat, id)
                                 };
+                                
+                                // 자동완성 선택 시 대상 분대 자동 추출
+                                let tokens: Vec<&str> = final_cmd.split_whitespace().collect();
+                                let mut target_squads = vec![];
+                                for t in &tokens {
+                                    if t.starts_with('@') {
+                                        let s = t.trim_start_matches('@').trim_end_matches("분대");
+                                        if let Ok(id) = s.parse::<usize>() {
+                                            target_squads.push(battle_core::types::SquadUuid(id));
+                                        }
+                                    }
+                                }
+                                
+                                // 대상 분대가 없으면 현재 선택된 분대 사용
+                                if target_squads.is_empty() {
+                                    let selected = self.gui_state.selected_squads();
+                                    if !selected.1.is_empty() {
+                                        target_squads = selected.1.clone();
+                                    } else {
+                                        // 전체 아군 분대
+                                        for squad_uuid in self.battle_state.squads().keys() {
+                                            let leader_idx = self.battle_state.squad(*squad_uuid).leader();
+                                            if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
+                                                target_squads.push(*squad_uuid);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Task 즉시 GUI에 등록 (채팅창 닫히기 전에)
+                                if !target_squads.is_empty() {
+                                    messages.push(EngineMessage::GuiState(GuiStateMessage::AddChatTask(final_cmd.clone(), target_squads)));
+                                }
+                                
                                 messages.push(EngineMessage::SendChatCommand(final_cmd));
                                 messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
                                 messages.push(EngineMessage::GuiState(GuiStateMessage::ToggleChatGui));
@@ -138,14 +172,24 @@ impl Engine {
                         ui.label("검색된 추천 전술이 없습니다.");
                     }
                 } else {
-                    // 입력값이 없을 경우 기존처럼 고정 프리셋 노출
+                    // 입력값이 없을 경우 동적으로 불러온 템플릿 목록(없으면 고정 프리셋) 노출
                     ui.horizontal(|ui| {
-                        if ui.button("즉각 대응 사격").clicked() {
-                            messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("suppress_fire".to_string()))));
+                        let templates = self.gui_state.available_templates.clone();
+                        if templates.is_empty() {
+                            if ui.button("즉각 대응 사격").clicked() {
+                                messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("suppress_fire".to_string()))));
+                            }
+                            if ui.button("은밀 우회 기동").clicked() {
+                                messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("sneak_flank".to_string()))));
+                            }
+                        } else {
+                            for template in templates {
+                                if ui.button(&template).clicked() {
+                                    messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some(template.clone()))));
+                                }
+                            }
                         }
-                        if ui.button("은밀 우회 기동").clicked() {
-                            messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("sneak_flank".to_string()))));
-                        }
+                        
                         if ui.button("취소").clicked() {
                             messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
                         }
@@ -158,6 +202,26 @@ impl Engine {
                         ui.label("적의 전술을 무력화(Counter)할 수 있는지 확인 후 확정하십시오.");
                         
                         if ui.button("✔ 전술 확정 및 실행").clicked() {
+                            // 확정 시 엔진에 넘기기 전에 대상 분대를 추출하여 Task UI 큐에 등록
+                            let mut target_squads = vec![];
+                            let selected_squads = self.gui_state.selected_squads();
+                            
+                            if !selected_squads.1.is_empty() {
+                                target_squads = selected_squads.1.clone();
+                            } else {
+                                // 전체 아군 분대 스캔
+                                for squad_uuid in self.battle_state.squads().keys() {
+                                    let leader_idx = self.battle_state.squad(*squad_uuid).leader();
+                                    if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
+                                        target_squads.push(*squad_uuid);
+                                    }
+                                }
+                            }
+
+                            if !target_squads.is_empty() {
+                                messages.push(EngineMessage::GuiState(GuiStateMessage::AddChatTask(selected.clone(), target_squads)));
+                            }
+
                             // 확정 시 엔진에 넘기고 상태를 초기화합니다.
                             messages.push(EngineMessage::SendChatCommand(selected.clone()));
                             messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
@@ -175,11 +239,34 @@ impl Engine {
     }
 
     pub fn update_task_gui(&mut self, ctx: &mut Context) -> GameResult<()> {
-        // [버그 수정] 다중 Task가 동일한 분대를 참조할 때, 하나를 취소(Idle 강제 전환)하면 
-        // 나머지 Task들도 연쇄적으로 자동 삭제되는 치명적 버그를 해결하기 위해 
-        // 섣부른 자동 해제 로직을 전면 제거하고 플레이어의 수동 취소에 의존합니다.
-        
+        // [추가] 각 Task에 할당된 분대가 전부 소멸(사망 등)했는지 검사하여 대기열에서 자동 제거합니다.
+        let mut tasks_to_retain = vec![];
+        for task in &self.gui_state.chat_tasks {
+            let mut any_squad_alive = false;
+            for squad_id in &task.2 {
+                if let Some(squad) = self.battle_state.squads().get(squad_id) {
+                    let alive_members_count = squad.members().iter().filter(|&&m| {
+                        m.0 < self.battle_state.soldiers().len() && self.battle_state.soldier(m).alive()
+                    }).count();
+                    if alive_members_count > 0 {
+                        any_squad_alive = true;
+                        break;
+                    }
+                }
+            }
+            if any_squad_alive {
+                tasks_to_retain.push(task.clone());
+            }
+        }
+        self.gui_state.chat_tasks = tasks_to_retain;
+
+        // Task가 비어있어도 UI는 표시하지 않지만, Task 추가 시 display_task_gui 플래그가 true인지 확인
         if self.gui_state.chat_tasks.is_empty() {
+            return Ok(());
+        }
+        
+        // Task UI는 항상 표시 (display_task_gui 플래그 확인)
+        if !self.gui_state.display_task_gui {
             return Ok(());
         }
 

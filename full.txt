@@ -10609,10 +10609,12 @@ impl Engine {
         let egui_ctx = self.egui_backend.inner.ctx();
         let mut messages = vec![];
 
+        let max_height = (ctx.gfx.drawable_size().1 / EGUI_SCALE) - 300.0;
         egui::Window::new("Debug")
             .anchor(Align2::LEFT_TOP, Vec2::new(0., 0.))
+            .max_height(max_height) // 윈도우 프레임 자체의 최대 높이를 강제로 제한하여 클릭 가로채기 방지
             .show(&egui_ctx, |ui| {
-                ScrollArea::vertical().show(ui, |ui| {
+                ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
                     messages.extend(self.debug_gui_header(ctx, &egui_ctx, ui));
                     messages.extend(self.debug_gui_body(ctx, &egui_ctx, ui));
                 })
@@ -12865,6 +12867,40 @@ impl Engine {
                                 } else {
                                     format!("{} {}", current_chat, id)
                                 };
+                                
+                                // 자동완성 선택 시 대상 분대 자동 추출
+                                let tokens: Vec<&str> = final_cmd.split_whitespace().collect();
+                                let mut target_squads = vec![];
+                                for t in &tokens {
+                                    if t.starts_with('@') {
+                                        let s = t.trim_start_matches('@').trim_end_matches("분대");
+                                        if let Ok(id) = s.parse::<usize>() {
+                                            target_squads.push(battle_core::types::SquadUuid(id));
+                                        }
+                                    }
+                                }
+                                
+                                // 대상 분대가 없으면 현재 선택된 분대 사용
+                                if target_squads.is_empty() {
+                                    let selected = self.gui_state.selected_squads();
+                                    if !selected.1.is_empty() {
+                                        target_squads = selected.1.clone();
+                                    } else {
+                                        // 전체 아군 분대
+                                        for squad_uuid in self.battle_state.squads().keys() {
+                                            let leader_idx = self.battle_state.squad(*squad_uuid).leader();
+                                            if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
+                                                target_squads.push(*squad_uuid);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Task 즉시 GUI에 등록 (채팅창 닫히기 전에)
+                                if !target_squads.is_empty() {
+                                    messages.push(EngineMessage::GuiState(GuiStateMessage::AddChatTask(final_cmd.clone(), target_squads)));
+                                }
+                                
                                 messages.push(EngineMessage::SendChatCommand(final_cmd));
                                 messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
                                 messages.push(EngineMessage::GuiState(GuiStateMessage::ToggleChatGui));
@@ -12874,14 +12910,24 @@ impl Engine {
                         ui.label("검색된 추천 전술이 없습니다.");
                     }
                 } else {
-                    // 입력값이 없을 경우 기존처럼 고정 프리셋 노출
+                    // 입력값이 없을 경우 동적으로 불러온 템플릿 목록(없으면 고정 프리셋) 노출
                     ui.horizontal(|ui| {
-                        if ui.button("즉각 대응 사격").clicked() {
-                            messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("suppress_fire".to_string()))));
+                        let templates = self.gui_state.available_templates.clone();
+                        if templates.is_empty() {
+                            if ui.button("즉각 대응 사격").clicked() {
+                                messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("suppress_fire".to_string()))));
+                            }
+                            if ui.button("은밀 우회 기동").clicked() {
+                                messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("sneak_flank".to_string()))));
+                            }
+                        } else {
+                            for template in templates {
+                                if ui.button(&template).clicked() {
+                                    messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some(template.clone()))));
+                                }
+                            }
                         }
-                        if ui.button("은밀 우회 기동").clicked() {
-                            messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("sneak_flank".to_string()))));
-                        }
+                        
                         if ui.button("취소").clicked() {
                             messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
                         }
@@ -12894,6 +12940,26 @@ impl Engine {
                         ui.label("적의 전술을 무력화(Counter)할 수 있는지 확인 후 확정하십시오.");
                         
                         if ui.button("✔ 전술 확정 및 실행").clicked() {
+                            // 확정 시 엔진에 넘기기 전에 대상 분대를 추출하여 Task UI 큐에 등록
+                            let mut target_squads = vec![];
+                            let selected_squads = self.gui_state.selected_squads();
+                            
+                            if !selected_squads.1.is_empty() {
+                                target_squads = selected_squads.1.clone();
+                            } else {
+                                // 전체 아군 분대 스캔
+                                for squad_uuid in self.battle_state.squads().keys() {
+                                    let leader_idx = self.battle_state.squad(*squad_uuid).leader();
+                                    if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
+                                        target_squads.push(*squad_uuid);
+                                    }
+                                }
+                            }
+
+                            if !target_squads.is_empty() {
+                                messages.push(EngineMessage::GuiState(GuiStateMessage::AddChatTask(selected.clone(), target_squads)));
+                            }
+
                             // 확정 시 엔진에 넘기고 상태를 초기화합니다.
                             messages.push(EngineMessage::SendChatCommand(selected.clone()));
                             messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
@@ -12911,11 +12977,34 @@ impl Engine {
     }
 
     pub fn update_task_gui(&mut self, ctx: &mut Context) -> GameResult<()> {
-        // [버그 수정] 다중 Task가 동일한 분대를 참조할 때, 하나를 취소(Idle 강제 전환)하면 
-        // 나머지 Task들도 연쇄적으로 자동 삭제되는 치명적 버그를 해결하기 위해 
-        // 섣부른 자동 해제 로직을 전면 제거하고 플레이어의 수동 취소에 의존합니다.
-        
+        // [추가] 각 Task에 할당된 분대가 전부 소멸(사망 등)했는지 검사하여 대기열에서 자동 제거합니다.
+        let mut tasks_to_retain = vec![];
+        for task in &self.gui_state.chat_tasks {
+            let mut any_squad_alive = false;
+            for squad_id in &task.2 {
+                if let Some(squad) = self.battle_state.squads().get(squad_id) {
+                    let alive_members_count = squad.members().iter().filter(|&&m| {
+                        m.0 < self.battle_state.soldiers().len() && self.battle_state.soldier(m).alive()
+                    }).count();
+                    if alive_members_count > 0 {
+                        any_squad_alive = true;
+                        break;
+                    }
+                }
+            }
+            if any_squad_alive {
+                tasks_to_retain.push(task.clone());
+            }
+        }
+        self.gui_state.chat_tasks = tasks_to_retain;
+
+        // Task가 비어있어도 UI는 표시하지 않지만, Task 추가 시 display_task_gui 플래그가 true인지 확인
         if self.gui_state.chat_tasks.is_empty() {
+            return Ok(());
+        }
+        
+        // Task UI는 항상 표시 (display_task_gui 플래그 확인)
+        if !self.gui_state.display_task_gui {
             return Ok(());
         }
 
@@ -13601,12 +13690,6 @@ impl Engine {
             }
             Some(VirtualKeyCode::F5) => {
                 messages.push(EngineMessage::TryLoadLastSave);
-            }
-            Some(VirtualKeyCode::F12) => {
-                // 디버그 GUI 토글만 수행하고, Task UI에는 영향을 주지 않음
-                messages.push(EngineMessage::GuiState(
-                    GuiStateMessage::SetDisplayDebugGui(!self.gui_state.display_debug_gui()),
-                ));
             }
             Some(VirtualKeyCode::F11) => {
                 if self.gui_state.is_fullscreen() {
@@ -14514,14 +14597,17 @@ impl EventHandler<ggez::GameError> for Engine {
                 }
 
                 if !append_str.is_empty() {
-                    if !self.gui_state.chat_input().is_empty() && !self.gui_state.chat_input().ends_with(' ') {
+                    // 동일한 분대나 섹터가 중복으로 입력되는 것을 방지합니다.
+                    if !self.gui_state.chat_input().contains(&append_str) {
+                        if !self.gui_state.chat_input().is_empty() && !self.gui_state.chat_input().ends_with(' ') {
+                            self.gui_state.chat_input_mut().push(' ');
+                        }
+                        self.gui_state.chat_input_mut().push_str(&append_str);
                         self.gui_state.chat_input_mut().push(' ');
+                        
+                        let query = self.gui_state.chat_input().to_string();
+                        self.react(vec![crate::engine::message::EngineMessage::RequestTacticSuggestions(query)], ctx)?;
                     }
-                    self.gui_state.chat_input_mut().push_str(&append_str);
-                    self.gui_state.chat_input_mut().push(' ');
-                    
-                    let query = self.gui_state.chat_input().to_string();
-                    self.react(vec![crate::engine::message::EngineMessage::RequestTacticSuggestions(query)], ctx)?;
                 }
             }
             return GameResult::Ok(());
@@ -14648,6 +14734,12 @@ impl EventHandler<ggez::GameError> for Engine {
         // [수정] Tab 키 입력은 채팅창 열기/닫기 토글용이므로 최우선적으로 가로채어 처리합니다.
         if input.keycode == Some(ggez::winit::event::VirtualKeyCode::Tab) {
             self.react(vec![EngineMessage::GuiState(GuiStateMessage::ToggleChatGui)], ctx)?;
+            return GameResult::Ok(());
+        }
+
+        // [수정] F12 키 입력은 전술 대기열(Task UI) 등으로 인한 Egui 포커스 탈취와 무관하게 항상 디버그 GUI 토글을 최우선으로 처리하도록 예외 처리합니다.
+        if input.keycode == Some(ggez::winit::event::VirtualKeyCode::F12) {
+            self.react(vec![EngineMessage::GuiState(GuiStateMessage::SetDisplayDebugGui(!self.gui_state.display_debug_gui()))], ctx)?;
             return GameResult::Ok(());
         }
 
@@ -15190,15 +15282,24 @@ impl Engine {
                         }
                     }
                     if target_squads.is_empty() {
-                        for squad_uuid in self.battle_state.squads().keys() {
-                            let leader_idx = self.battle_state.squad(*squad_uuid).leader();
-                            if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
-                                target_squads.push(*squad_uuid);
+                        // 현재 선택된 분대 우선
+                        let selected = self.gui_state.selected_squads();
+                        if !selected.1.is_empty() {
+                            target_squads = selected.1.clone();
+                        } else {
+                            for squad_uuid in self.battle_state.squads().keys() {
+                                let leader_idx = self.battle_state.squad(*squad_uuid).leader();
+                                if self.battle_state.soldier(leader_idx).side() == &battle_core::game::Side::A {
+                                    target_squads.push(*squad_uuid);
+                                }
                             }
                         }
                     }
                     
-                    self.gui_state.react(&GuiStateMessage::AddChatTask(command.clone(), target_squads), ctx);
+                    // [수정] Task 중복 확인 로직을 상태 관리(state.rs) 내부의 병합(Append) 로직으로 위임하고 무조건 이벤트를 발송합니다.
+                    if !target_squads.is_empty() {
+                        self.gui_state.react(&GuiStateMessage::AddChatTask(command.clone(), target_squads), ctx);
+                    }
 
                     if let Err(error) = self.output.send(vec![InputMessage::ChatCommand(command)]) {
                         eprintln!("Error when try to send chat command to server : {}", error);
@@ -15799,8 +15900,27 @@ impl GuiState {
                 self.tactic_suggestions = suggestions.clone();
             }
             GuiStateMessage::AddChatTask(command, squads) => {
-                self.chat_task_counter += 1;
-                self.chat_tasks.push((self.chat_task_counter, command.clone(), squads.clone()));
+                // [수정] 동일한 명령(command)이 이미 존재한다면, 새 분대들을 기존 대기열에 병합(Append)합니다.
+                let mut found = false;
+                for (_, existing_cmd, existing_squads) in &mut self.chat_tasks {
+                    if existing_cmd == command {
+                        for sq in squads.iter() {
+                            if !existing_squads.contains(sq) {
+                                existing_squads.push(*sq);
+                            }
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if !found {
+                    self.chat_task_counter += 1;
+                    self.chat_tasks.push((self.chat_task_counter, command.clone(), squads.clone()));
+                }
+
+                // Task 추가 시 Task UI가 자동으로 보이도록 설정
+                self.display_task_gui = true;
             }
             GuiStateMessage::RemoveChatTask(id) => {
                 // [수정] 특정 ID를 가진 Task만 제거
@@ -26632,6 +26752,18 @@ impl Runner {
         // [신규 추가: 직접 클릭 기반 명령어 LLM 바이패스 및 즉시 실행]
         // 입력 내용이 오직 클릭 기반(분대, 이동, 공격 토큰)으로만 구성되어 있다면 LLM을 생략하고 즉시 실행합니다.
         let tokens: Vec<&str> = command.split_whitespace().collect();
+        // 템플릿 ID(예: suppress_fire, sneak_flank 등)도 직접 명령으로 인식하도록 확장
+        let is_template_command = !tokens.is_empty() && tokens.iter().any(|t| {
+            // 템플릿 ID 매칭 (tactic_manager의 템플릿 ID 목록과 비교)
+            if let Some(tm) = &self.tactic_manager {
+                tm.templates.iter().any(|template| template.id == *t)
+            } else {
+                false
+            }
+        });
+
+        // @, &, #으로 시작하는 토큰으로만 이루어진 경우 직접 명령으로 처리 
+        // (템플릿 ID가 포함된 경우는 마크다운 본문을 주입하여 LLM 분석을 거쳐야 하므로 우회 대상에서 제외)
         let is_direct_command = !tokens.is_empty() && tokens.iter().all(|t| t.starts_with('@') || t.starts_with('&') || t.starts_with('#'));
 
         if is_direct_command {
@@ -26757,16 +26889,6 @@ impl Runner {
                         battle_core::state::battle::message::SoldierMessage::SetOrder(order)
                     );
                     messages_to_react.push(crate::runner::message::RunnerMessage::BattleState(msg));
-                }
-            }
-
-            // [수정] target_squads가 아직 유효하므로 clone() 없이 사용 가능
-            if !target_squads.is_empty() && !messages_to_react.is_empty() {
-                let task_command = command.to_string();
-                let task_squads = target_squads.clone();
-                let task_msg = battle_core::state::client::ClientStateMessage::AddChatTask(task_command, task_squads);
-                if let Err(e) = self.output.send(vec![battle_core::message::OutputMessage::ClientState(task_msg)]) {
-                    println!("[LLM Bridge] Task 등록 메시지 전송 실패: {}", e);
                 }
             }
 
@@ -27040,6 +27162,7 @@ impl Runner {
                         
                         // 기동 방식 결정을 위한 후보군 벡터 매칭 데이터베이스 정의
                         let action_candidates = vec![
+                            ("FlankTo", "우회 우회하라 측면공격 측면기동 빙돌아서 사이드로 빠져라"), // 우회 전용 기동 추가
                             ("SneakTo", "조용히 은밀 기동 진입 스닉 포복 포복이동 침투"),
                             ("MoveFastTo", "신속 급속 기동 런 전력질주 빠른이동 달려가기"),
                             ("MoveTo", "이동 간다 진격 목표 기동 도달"),
@@ -27094,9 +27217,67 @@ impl Runner {
                         }
 
                         let leader_pos = leader.world_point();
+                        let mut target_point = battle_core::types::WorldPoint::new(leader_pos.x + 100.0, leader_pos.y + 100.0);
+
+                        // [우회 기동(FlankTo) 로직] 적군이나 건물을 중심축으로 삼아 사격선에서 이탈하는 경로 생성
+                        if best_variant == "FlankTo" {
+                            let mut axis_center = None;
+                            let mut min_dist = std::f32::MAX;
+
+                            // 1. 가장 가까운 적을 중심축으로 설정
+                            for enemy in self.battle_state.soldiers() {
+                                if enemy.side() != leader.side() && enemy.alive() {
+                                    let dist = (enemy.world_point().to_vec2() - leader_pos.to_vec2()).length();
+                                    if dist < min_dist {
+                                        min_dist = dist;
+                                        axis_center = Some(enemy.world_point().to_vec2());
+                                    }
+                                }
+                            }
+
+                            // 2. 적이 없으면 가장 가까운 건물을 중심축으로 설정
+                            if axis_center.is_none() {
+                                for interior in self.battle_state.map().interiors() {
+                                    let cx = interior.x() + interior.width() / 2.0;
+                                    let cy = interior.y() + interior.height() / 2.0;
+                                    let dist = (glam::Vec2::new(cx, cy) - leader_pos.to_vec2()).length();
+                                    if dist < min_dist {
+                                        min_dist = dist;
+                                        axis_center = Some(glam::Vec2::new(cx, cy));
+                                    }
+                                }
+                            }
+
+                            if let Some(center) = axis_center {
+                                let dir = if (center - leader_pos.to_vec2()).length() > 0.1 {
+                                    (center - leader_pos.to_vec2()).normalize()
+                                } else {
+                                    glam::Vec2::new(1.0, 0.0)
+                                };
+
+                                // 사격선(직선)에서 벗어나기 위해 90도 측면 벡터 도출 (분대 UUID 홀짝으로 좌우 분배)
+                                let perp_dir = if squad.leader().0 % 2 == 0 {
+                                    glam::Vec2::new(-dir.y, dir.x)
+                                } else {
+                                    glam::Vec2::new(dir.y, -dir.x)
+                                };
+
+                                // 사선에서 벗어나는 크기(약 50m = 166픽셀)만큼 측면으로 빠짐
+                                let flank_vec = leader_pos.to_vec2() + perp_dir * 166.0 + dir * 50.0;
+                                
+                                let map_w = self.battle_state.map().visual_width() as f32 - 30.0;
+                                let map_h = self.battle_state.map().visual_height() as f32 - 30.0;
+                                target_point = battle_core::types::WorldPoint::new(
+                                    flank_vec.x.clamp(30.0, map_w.max(30.0)),
+                                    flank_vec.y.clamp(30.0, map_h.max(30.0))
+                                );
+                                println!("[LLM Bridge] 우회 기동 경로 계산 완료: 사선 이탈 및 측면 타격점 생성");
+                            }
+                        }
+
                         let grid_path = vec![
                             battle_core::types::WorldPoint::new(leader_pos.x, leader_pos.y),
-                            battle_core::types::WorldPoint::new(leader_pos.x + 100.0, leader_pos.y + 100.0),
+                            target_point,
                         ];
                         let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(grid_path)]);
 
@@ -27108,7 +27289,7 @@ impl Runner {
                         };
 
                         let order = match best_variant {
-                            "SneakTo" => battle_core::order::Order::SneakTo(paths, then_order),
+                            "SneakTo" | "FlankTo" => battle_core::order::Order::SneakTo(paths, then_order),
                             "MoveFastTo" => battle_core::order::Order::MoveFastTo(paths, then_order),
                             "SuppressFire" => battle_core::order::Order::SuppressFire(battle_core::types::WorldPoint::new(leader_pos.x + 200.0, leader_pos.y + 200.0)),
                             "Defend" => battle_core::order::Order::Defend(battle_core::types::Angle(0.0)),

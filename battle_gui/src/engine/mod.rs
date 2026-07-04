@@ -388,14 +388,17 @@ impl EventHandler<ggez::GameError> for Engine {
                 }
 
                 if !append_str.is_empty() {
-                    if !self.gui_state.chat_input().is_empty() && !self.gui_state.chat_input().ends_with(' ') {
+                    // 동일한 분대나 섹터가 중복으로 입력되는 것을 방지합니다.
+                    if !self.gui_state.chat_input().contains(&append_str) {
+                        if !self.gui_state.chat_input().is_empty() && !self.gui_state.chat_input().ends_with(' ') {
+                            self.gui_state.chat_input_mut().push(' ');
+                        }
+                        self.gui_state.chat_input_mut().push_str(&append_str);
                         self.gui_state.chat_input_mut().push(' ');
+                        
+                        let query = self.gui_state.chat_input().to_string();
+                        self.react(vec![crate::engine::message::EngineMessage::RequestTacticSuggestions(query)], ctx)?;
                     }
-                    self.gui_state.chat_input_mut().push_str(&append_str);
-                    self.gui_state.chat_input_mut().push(' ');
-                    
-                    let query = self.gui_state.chat_input().to_string();
-                    self.react(vec![crate::engine::message::EngineMessage::RequestTacticSuggestions(query)], ctx)?;
                 }
             }
             return GameResult::Ok(());
@@ -522,6 +525,12 @@ impl EventHandler<ggez::GameError> for Engine {
         // [수정] Tab 키 입력은 채팅창 열기/닫기 토글용이므로 최우선적으로 가로채어 처리합니다.
         if input.keycode == Some(ggez::winit::event::VirtualKeyCode::Tab) {
             self.react(vec![EngineMessage::GuiState(GuiStateMessage::ToggleChatGui)], ctx)?;
+            return GameResult::Ok(());
+        }
+
+        // [수정] F12 키 입력은 전술 대기열(Task UI) 등으로 인한 Egui 포커스 탈취와 무관하게 항상 디버그 GUI 토글을 최우선으로 처리하도록 예외 처리합니다.
+        if input.keycode == Some(ggez::winit::event::VirtualKeyCode::F12) {
+            self.react(vec![EngineMessage::GuiState(GuiStateMessage::SetDisplayDebugGui(!self.gui_state.display_debug_gui()))], ctx)?;
             return GameResult::Ok(());
         }
 

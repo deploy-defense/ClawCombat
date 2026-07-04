@@ -89,6 +89,18 @@ impl Runner {
         // [신규 추가: 직접 클릭 기반 명령어 LLM 바이패스 및 즉시 실행]
         // 입력 내용이 오직 클릭 기반(분대, 이동, 공격 토큰)으로만 구성되어 있다면 LLM을 생략하고 즉시 실행합니다.
         let tokens: Vec<&str> = command.split_whitespace().collect();
+        // 템플릿 ID(예: suppress_fire, sneak_flank 등)도 직접 명령으로 인식하도록 확장
+        let is_template_command = !tokens.is_empty() && tokens.iter().any(|t| {
+            // 템플릿 ID 매칭 (tactic_manager의 템플릿 ID 목록과 비교)
+            if let Some(tm) = &self.tactic_manager {
+                tm.templates.iter().any(|template| template.id == *t)
+            } else {
+                false
+            }
+        });
+
+        // @, &, #으로 시작하는 토큰으로만 이루어진 경우 직접 명령으로 처리 
+        // (템플릿 ID가 포함된 경우는 마크다운 본문을 주입하여 LLM 분석을 거쳐야 하므로 우회 대상에서 제외)
         let is_direct_command = !tokens.is_empty() && tokens.iter().all(|t| t.starts_with('@') || t.starts_with('&') || t.starts_with('#'));
 
         if is_direct_command {
@@ -487,6 +499,7 @@ impl Runner {
                         
                         // 기동 방식 결정을 위한 후보군 벡터 매칭 데이터베이스 정의
                         let action_candidates = vec![
+                            ("FlankTo", "우회 우회하라 측면공격 측면기동 빙돌아서 사이드로 빠져라"), // 우회 전용 기동 추가
                             ("SneakTo", "조용히 은밀 기동 진입 스닉 포복 포복이동 침투"),
                             ("MoveFastTo", "신속 급속 기동 런 전력질주 빠른이동 달려가기"),
                             ("MoveTo", "이동 간다 진격 목표 기동 도달"),
@@ -541,9 +554,67 @@ impl Runner {
                         }
 
                         let leader_pos = leader.world_point();
+                        let mut target_point = battle_core::types::WorldPoint::new(leader_pos.x + 100.0, leader_pos.y + 100.0);
+
+                        // [우회 기동(FlankTo) 로직] 적군이나 건물을 중심축으로 삼아 사격선에서 이탈하는 경로 생성
+                        if best_variant == "FlankTo" {
+                            let mut axis_center = None;
+                            let mut min_dist = std::f32::MAX;
+
+                            // 1. 가장 가까운 적을 중심축으로 설정
+                            for enemy in self.battle_state.soldiers() {
+                                if enemy.side() != leader.side() && enemy.alive() {
+                                    let dist = (enemy.world_point().to_vec2() - leader_pos.to_vec2()).length();
+                                    if dist < min_dist {
+                                        min_dist = dist;
+                                        axis_center = Some(enemy.world_point().to_vec2());
+                                    }
+                                }
+                            }
+
+                            // 2. 적이 없으면 가장 가까운 건물을 중심축으로 설정
+                            if axis_center.is_none() {
+                                for interior in self.battle_state.map().interiors() {
+                                    let cx = interior.x() + interior.width() / 2.0;
+                                    let cy = interior.y() + interior.height() / 2.0;
+                                    let dist = (glam::Vec2::new(cx, cy) - leader_pos.to_vec2()).length();
+                                    if dist < min_dist {
+                                        min_dist = dist;
+                                        axis_center = Some(glam::Vec2::new(cx, cy));
+                                    }
+                                }
+                            }
+
+                            if let Some(center) = axis_center {
+                                let dir = if (center - leader_pos.to_vec2()).length() > 0.1 {
+                                    (center - leader_pos.to_vec2()).normalize()
+                                } else {
+                                    glam::Vec2::new(1.0, 0.0)
+                                };
+
+                                // 사격선(직선)에서 벗어나기 위해 90도 측면 벡터 도출 (분대 UUID 홀짝으로 좌우 분배)
+                                let perp_dir = if squad.leader().0 % 2 == 0 {
+                                    glam::Vec2::new(-dir.y, dir.x)
+                                } else {
+                                    glam::Vec2::new(dir.y, -dir.x)
+                                };
+
+                                // 사선에서 벗어나는 크기(약 50m = 166픽셀)만큼 측면으로 빠짐
+                                let flank_vec = leader_pos.to_vec2() + perp_dir * 166.0 + dir * 50.0;
+                                
+                                let map_w = self.battle_state.map().visual_width() as f32 - 30.0;
+                                let map_h = self.battle_state.map().visual_height() as f32 - 30.0;
+                                target_point = battle_core::types::WorldPoint::new(
+                                    flank_vec.x.clamp(30.0, map_w.max(30.0)),
+                                    flank_vec.y.clamp(30.0, map_h.max(30.0))
+                                );
+                                println!("[LLM Bridge] 우회 기동 경로 계산 완료: 사선 이탈 및 측면 타격점 생성");
+                            }
+                        }
+
                         let grid_path = vec![
                             battle_core::types::WorldPoint::new(leader_pos.x, leader_pos.y),
-                            battle_core::types::WorldPoint::new(leader_pos.x + 100.0, leader_pos.y + 100.0),
+                            target_point,
                         ];
                         let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(grid_path)]);
 
@@ -555,7 +626,7 @@ impl Runner {
                         };
 
                         let order = match best_variant {
-                            "SneakTo" => battle_core::order::Order::SneakTo(paths, then_order),
+                            "SneakTo" | "FlankTo" => battle_core::order::Order::SneakTo(paths, then_order),
                             "MoveFastTo" => battle_core::order::Order::MoveFastTo(paths, then_order),
                             "SuppressFire" => battle_core::order::Order::SuppressFire(battle_core::types::WorldPoint::new(leader_pos.x + 200.0, leader_pos.y + 200.0)),
                             "Defend" => battle_core::order::Order::Defend(battle_core::types::Angle(0.0)),
