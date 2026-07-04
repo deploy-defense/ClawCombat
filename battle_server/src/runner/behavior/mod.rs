@@ -58,63 +58,7 @@ impl Runner {
         // [YOLO Mode Auto-Awake & Auto-Unhide] 
         // 폭발로 인해 강제 엄폐(Hide)되었거나, 게임 시작 시 배치(Placement)로 인해 방어(Defend) 중인 봇들을 깨웁니다.
         // YOLO 모드이거나 정찰조(Scout)라면, 안전한 상태일 때 즉각 기동(Idle) 상태로 전환하여 자동 진격 및 로테이션 알고리즘을 태웁니다.
-        
-        // [순환 체크포인트 절차 밀어내기 반영] 진영의 YOLO 모드 활성화 여부와 관계없이, 
-        // 아군이 소유한 깃발이 존재한다면 순환 기동(Patrol)을 수행하기 위해 방어(Defend) 및 유지(Hold) 모드를 무조건 강제 해제합니다.
-        let map = self.battle_state.map();
-        let mut has_owned_flags = false;
-        for flag in map.flags() {
-            let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
-                n == flag.name() && (
-                    o == &battle_core::game::flag::FlagOwnership::Both || 
-                    (is_side_a && o == &battle_core::game::flag::FlagOwnership::A) ||
-                    (is_side_b && o == &battle_core::game::flag::FlagOwnership::B)
-                )
-            });
-            if is_owned {
-                has_owned_flags = true;
-                break;
-            }
-        }
-
-        // [전방/후방 순환 반영] 현재 아군 분대들의 Y 좌표를 비교하여 전방(Front)과 후방(Rear)을 동적으로 구분합니다.
-        let mut friendly_squad_ys = vec![];
-        for (sq_uuid, sq_comp) in self.battle_state.squads() {
-            let sq_leader = self.battle_state.soldier(sq_comp.leader());
-            if sq_leader.side() == soldier.side() && sq_leader.alive() {
-                friendly_squad_ys.push((*sq_uuid, sq_leader.world_point().y));
-            }
-        }
-        // 진영 방향에 따라 전방/후방 정렬 (A진영은 Y가 클수록 전방, B진영은 Y가 작을수록 전방)
-        friendly_squad_ys.sort_by(|a, b| {
-            if is_side_a {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            } else {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            }
-        });
-        
-        // 뒤의 절반은 후방(Rear)으로 순환 기동(Patrol)을 담당합니다.
-        let half_idx = friendly_squad_ys.len() / 2;
-        let mut is_rear_squad = false;
-        if let Some(pos) = friendly_squad_ys.iter().position(|(sq, _)| sq == &soldier.squad_uuid()) {
-            is_rear_squad = pos >= half_idx;
-        }
-
-        let should_awake = if has_owned_flags && !is_scout {
-            let hide_duration = self.battle_state.frame_i().saturating_sub(soldier.last_hide_frame_i());
-            if is_rear_squad {
-                // [순환 교대 반영] 후방 분대는 전방으로 무조건 출발하여 교대합니다.
-                // 게임 시작 직후(600프레임 이내)에는 즉시 출발, 이후에는 5초(300프레임) 대기 후 출발
-                // (조건 완화: 방어/은폐 상태가 아니더라도 Idle 상태이면 출발)
-                (matches!(current_order, Order::Idle) || matches!(current_order, Order::Defend(_) | Order::Hide(_))) && 
-                (hide_duration >= 300 || *self.battle_state.frame_i() < 600)
-            } else {
-                // 전방 분대는 교대를 위해 대기하다가 일정 시간(40초 = 2400프레임) 방어 후 순환을 위해 깨어납니다.
-                matches!(current_order, Order::Defend(_) | Order::Hide(_)) && hide_duration >= 2400
-            }
-        } else if yolo_active || is_scout {
-            // YOLO 모드나 정찰조는 방어/은폐 상태일 때만 깨어남
+        let should_awake = if yolo_active || is_scout {
             matches!(current_order, Order::Defend(_) | Order::Hide(_))
         } else {
             matches!(current_order, Order::Hide(_))
@@ -126,26 +70,10 @@ impl Runner {
                 temp_order_storage = Some(Order::Idle);
                 current_order = temp_order_storage.as_ref().unwrap();
                 
-                // 단일 개인이 아닌 분대 구조로 매칭을 확장 적용
-                if let Some(squad) = self.battle_state.squads().get(&soldier.squad_uuid()) {
-                    for member_idx in squad.members() {
-                        messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
-                            *member_idx,
-                            SoldierMessage::SetOrder(Order::Idle),
-                        )));
-
-                        // [요청 반영] hiding 분대, 병사는 무조건 idle로 변경후에 순환되게 반영
-                        messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
-                            *member_idx,
-                            SoldierMessage::SetBehavior(Behavior::Idle(Body::Crouched)),
-                        )));
-                        
-                        messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
-                            *member_idx,
-                            SoldierMessage::SetGesture(battle_core::behavior::gesture::Gesture::Idle),
-                        )));
-                    }
-                }
+                messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
+                    soldier.uuid(),
+                    SoldierMessage::SetOrder(Order::Idle),
+                )));
             }
         }
 
@@ -967,7 +895,16 @@ impl Runner {
         });
 
         // [건물 내부 안전지대 교전 로직]
-        // 기존의 무조건적인 실내 Hiding 강제 자동 전환 로직을 제거하여, 실내에 진입한 병사도 정상적으로 적을 탐색하여 응사하거나 진격할 수 있도록 교정합니다.
+        // 건물 내부에 진입한 병사는 평야처럼 멍청하게 서서 교전하지 않고, 창문이나 내부 구조물을 활용해
+        // 엎드려서(Hide) 몸을 보호하고 '숨었다가 쏘는(Peek & Shoot)' 농성 전술을 최우선으로 채택합니다.
+        if is_indoor && !yolo_active {
+            if let Some(opponent) = self.soldier_find_opponent_to_target(soldier, None, &ChooseMethod::RandomFromNearest) {
+                // 실내에서는 즉각 사격하는 대신 일단 엎드려 방어/엄폐 태세로 사격을 준비합니다.
+                return Behavior::Hide(battle_core::utils::angle(&opponent.world_point(), &soldier.world_point()));
+            } else {
+                return Behavior::Hide(soldier.get_looking_direction());
+            }
+        }
 
         let mut opponent_to_engage = self.soldier_find_opponent_to_target(soldier, None, &ChooseMethod::RandomFromNearest);
 
@@ -1021,25 +958,7 @@ impl Runner {
         } else {
             // [YOLO Mode] 가장 가장 가까운 미점령/적 깃발로 자동 진격하되, 적군의 사로를 피하는 전술 네비게이션 사용
             // 수정: 부하 병사들이 제멋대로 다른 목표를 잡고 이탈하는 것을 막기 위해, 오직 분대장(Leader)만이 전략적 타겟을 계산하도록 제한합니다.
-            
-            // [순환 체크포인트 절차 밀어내기 반영] YOLO 모드가 아니더라도, 소유한 깃발이 있다면 순환 기동(Patrol)을 수행할 수 있도록 조건을 개방합니다.
-            let mut has_owned_flags_for_patrol = false;
-            let map_for_patrol = self.battle_state.map();
-            for flag in map_for_patrol.flags() {
-                let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
-                    n == flag.name() && (
-                        o == &battle_core::game::flag::FlagOwnership::Both || 
-                        (is_side_a && o == &battle_core::game::flag::FlagOwnership::A) ||
-                        (is_side_b && o == &battle_core::game::flag::FlagOwnership::B)
-                    )
-                });
-                if is_owned {
-                    has_owned_flags_for_patrol = true;
-                    break;
-                }
-            }
-
-            if (yolo_active || is_scout || has_owned_flags_for_patrol) && self.soldier_is_squad_leader(soldier.uuid()) {
+            if (yolo_active || is_scout) && self.soldier_is_squad_leader(soldier.uuid()) {
                 // 3. 중대(Company) 그룹핑 및 정찰조(Scout) 역할 확인
                 // [하드코딩 락 전면 해제 패치: 중대별 고유 분대 UUID의 병렬 동시 구동 성립]
                 // 1. 기존의 특정 분대(0분대)에만 쏠려있던 오더 전파 예외 락과 오염 조건 분기를 원천 제거합니다.
@@ -1062,41 +981,6 @@ impl Runner {
                 }
 
                 let mut tactical_costs = std::collections::HashMap::new();
-
-                let mut all_flags_owned = true;
-                for flag in map.flags() {
-                    let is_cooldown = {
-                        let cooldown_guard = self.flag_cooldown_data.read().unwrap();
-                        if let Some((_, cooled_sq)) = cooldown_guard.get(&flag.name().0) {
-                            *cooled_sq == soldier.squad_uuid()
-                        } else {
-                            false
-                        }
-                    };
-                    if is_cooldown { continue; } // 쿨다운 깃발은 없는 것으로 인식
-
-                    let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
-                        n == flag.name() && (
-                            o == &battle_core::game::flag::FlagOwnership::Both || 
-                            (soldier.side() == &battle_core::game::Side::A && o == &battle_core::game::flag::FlagOwnership::A) ||
-                            (soldier.side() == &battle_core::game::Side::B && o == &battle_core::game::flag::FlagOwnership::B)
-                        )
-                    });
-                    if !is_owned {
-                        all_flags_owned = false;
-                        break;
-                    }
-                }
-
-                // [요청 반영] 절대 흙길 제외, 숲으로만 이동하게 진행하고 만약에 흙길을 가는 경우는 해당 flag가 점령된경우를 제외하고는 절대 흙길을 가지 않게
-                if !all_flags_owned {
-                    for tile in map.terrain_tiles() {
-                        if matches!(tile.type_(), battle_core::map::terrain::TileType::Dirt | battle_core::map::terrain::TileType::ShortGrass | battle_core::map::terrain::TileType::MiddleGrass | battle_core::map::terrain::TileType::HighGrass | battle_core::map::terrain::TileType::Concrete | battle_core::map::terrain::TileType::Mud) {
-                            let tg = battle_core::types::GridPoint::new(tile.x as i32, tile.y as i32);
-                            *tactical_costs.entry(tg).or_insert(0) += 50000;
-                        }
-                    }
-                }
                 
                 // [Step 1: Tactical Ping] 사격이 발생했던 적 원점(위험 사로)을 접근 금지 구역으로 설정
                 for (ping_grid, (_, ping_side)) in &self.tactical_pings {
@@ -1113,20 +997,20 @@ impl Runner {
                 for enemy in self.battle_state.soldiers().iter().filter(|s| s.side() != soldier.side() && s.alive()) {
                     let enemy_grid = map.grid_point_from_world_point(&enemy.world_point());
                     
-                    // [요청 반영] 이동시에는 무조건 유효 사거리 밖으로 이동 되게 반영 (반경 약 60m 적용)
-                    let core_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 60, 60);
-                    let edge_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 80, 80);
+                    // 중심부는 극도의 위험(Center Risk), 외곽은 우회(Edge) 영역으로 분리하여 칠함
+                    let core_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 15, 15);
+                    let edge_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 35, 35);
                     
                     for eg in edge_grids {
                         // Edge 영역은 상대적으로 낮은 우회 비용 부여 (가장자리를 타도록 유도)
-                        *tactical_costs.entry(eg).or_insert(0) += 500; 
+                        *tactical_costs.entry(eg).or_insert(0) += 20; 
                     }
                     for cg in core_grids {
                         if let Some(tile) = map.terrain_tiles().get((cg.y * map.width() as i32 + cg.x) as usize) {
                             if self.config.terrain_tile_opacity(&tile.type_) < 0.1 {
-                                *tactical_costs.entry(cg).or_insert(0) += 10000; // 중심부 평야는 절대 진입 금지(Risk Max)
+                                *tactical_costs.entry(cg).or_insert(0) += 1000; // 중심부 평야는 절대 진입 금지(Risk Max)
                             } else {
-                                *tactical_costs.entry(cg).or_insert(0) += 5000; // 숲이더라도 중심부면 강력 회피
+                                *tactical_costs.entry(cg).or_insert(0) += 200; // 숲이더라도 중심부면 회피
                             }
                         }
                     }
@@ -1143,84 +1027,37 @@ impl Runner {
                     }
                 }
 
-                // [기획 반영: 비정찰조(본대)의 체크포인트 순찰 복귀 및 조건부 순환 밀어내기]
+                // [기획 반영: 비정찰조(본대)의 체크포인트 순찰 복귀]
                 if !is_scout {
-                    // [최적화 & 버그 수정: 순환(Patrol)을 위한 과도한 A* 길찾기 제거]
-                    // 연산 프리징을 유발하던 매 프레임 경로 탐색 타일 검사를 삭제하고, 
-                    // 절반 이상의 분대(UUID 홀수)를 순환조로, 나머지를 공격/거점 방어조로 고정 할당하여 버벅거림을 해소합니다.
-                    let mut should_patrol = false;
-                    let mut owned_flags_for_check = vec![];
-                    let mut has_enemy_flags = false;
-
-                    for flag in map.flags() {
-                        let is_cooldown = {
-                            let cooldown_guard = self.flag_cooldown_data.read().unwrap();
-                            if let Some((_, cooled_sq)) = cooldown_guard.get(&flag.name().0) {
-                                *cooled_sq == soldier.squad_uuid()
-                            } else {
-                                false
-                            }
-                        };
-                        if is_cooldown { continue; } // 쿨다운 깃발은 순찰/점령 목표 계산에서 제외
-
-                        let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
-                            n == flag.name() && (
-                                o == &battle_core::game::flag::FlagOwnership::Both || 
-                                (soldier.side() == &battle_core::game::Side::A && o == &battle_core::game::flag::FlagOwnership::A) ||
-                                (soldier.side() == &battle_core::game::Side::B && o == &battle_core::game::flag::FlagOwnership::B)
-                            )
-                        });
-                        if is_owned {
-                            owned_flags_for_check.push(flag.clone());
-                        } else {
-                             has_enemy_flags = true;
-                        }
-                    }
-
-                    if !owned_flags_for_check.is_empty() {
-                        // 홀수 번호 분대는 깃발 순환(Patrol) 담당으로 역할을 분담하여 최소 50% 이상 순환 유지
-                        if soldier.squad_uuid().0 % 2 != 0 {
-                            should_patrol = true;
-                        } else {
-                            // 짝수 번호 분대는 미점령 깃발이 있다면 거점 공격, 없다면 거점 방어(CP 복귀)
-                            if has_enemy_flags {
-                                should_patrol = true; // 타겟팅 로직으로 넘기기 위해 true
-                            }
-                        }
-                    }
-
-                    // 순환/공격 조건이 충족되지 않았을 때만 기존의 체크포인트 복귀/대기 로직을 수행합니다.
-                    if !should_patrol {
-                        if let Some(cp) = self.checkpoints.read().unwrap().get(&soldier.squad_uuid()) {
-                            let dist_to_cp = battle_core::physics::utils::distance_between_points(&soldier.world_point(), cp).meters();
-                            if dist_to_cp > 15 { 
-                                let from_grid = map.grid_point_from_world_point(&soldier.world_point());
-                                let to_grid = map.grid_point_from_world_point(cp);
-                                if from_grid != to_grid {
-                                    if let Some(grid_path) = find_path(&self.config, map, &from_grid, &to_grid, true, &PathMode::Walk, &None) {
-                                        let world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
-                                        let paths = WorldPaths::new(vec![WorldPath::new(world_path)]);
-                                        
-                                        // [Part 2: 체크포인트 신속 복귀] 포복(Sneak) 대신 전력 질주(MoveFast)로 복귀 속도 극대화
-                                        let local_temp_order = Order::MoveFastTo(paths.clone(), Some(Box::new(Order::Idle)));
-                                        messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
-                                            soldier.uuid(),
-                                            SoldierMessage::SetOrder(local_temp_order)
-                                        )));
-                                        
-                                        if (*self.battle_state.frame_i()) % 300 == 0 {
-                                            println!("[복귀] 방어조(분대 {})가 체크포인트로 신속 복귀 중입니다.", soldier.squad_uuid().0);
-                                        }
-                                        
-                                        return Behavior::MoveFastTo(paths);
+                    if let Some(cp) = self.checkpoints.read().unwrap().get(&soldier.squad_uuid()) {
+                        let dist_to_cp = battle_core::physics::utils::distance_between_points(&soldier.world_point(), cp).meters();
+                        if dist_to_cp > 15 { 
+                            let from_grid = map.grid_point_from_world_point(&soldier.world_point());
+                            let to_grid = map.grid_point_from_world_point(cp);
+                            if from_grid != to_grid {
+                                if let Some(grid_path) = find_path(&self.config, map, &from_grid, &to_grid, true, &PathMode::Walk, &None) {
+                                    let world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
+                                    let paths = WorldPaths::new(vec![WorldPath::new(world_path)]);
+                                    
+                                    // [Part 2: 체크포인트 신속 복귀] 포복(Sneak) 대신 전력 질주(MoveFast)로 복귀 속도 극대화
+                                    let local_temp_order = Order::MoveFastTo(paths.clone(), Some(Box::new(Order::Idle)));
+                                    messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
+                                        soldier.uuid(),
+                                        SoldierMessage::SetOrder(local_temp_order)
+                                    )));
+                                    
+                                    if (*self.battle_state.frame_i()) % 300 == 0 {
+                                        println!("[복귀] 비정찰조(분대 {})가 체크포인트로 신속 복귀 중입니다.", soldier.squad_uuid().0);
                                     }
+                                    
+                                    return Behavior::MoveFastTo(paths);
                                 }
-                            } else {
-                                if (*self.battle_state.frame_i()) % 300 == 0 {
-                                    println!("[대기] 방어조(분대 {})가 체크포인트에 안착하여 대기 중입니다.", soldier.squad_uuid().0);
-                                }
-                                return Behavior::Idle(Body::Crouched);
                             }
+                        } else {
+                            if (*self.battle_state.frame_i()) % 300 == 0 {
+                                println!("[대기] 비정찰조(분대 {})가 체크포인트에 안착하여 대기 중입니다.", soldier.squad_uuid().0);
+                            }
+                            return Behavior::Idle(Body::Crouched);
                         }
                     }
                 }
@@ -1230,21 +1067,8 @@ impl Runner {
 
                 let mut weakest_flag = None;
                 let mut lowest_risk = std::f32::MAX;
-                
-                // [신규] 보유한 깃발 목록 수집을 위한 배열
-                let mut owned_flags = vec![];
 
                 for flag in map.flags() {
-                    let is_cooldown = {
-                        let cooldown_guard = self.flag_cooldown_data.read().unwrap();
-                        if let Some((_, cooled_sq)) = cooldown_guard.get(&flag.name().0) {
-                            *cooled_sq == soldier.squad_uuid()
-                        } else {
-                            false
-                        }
-                    };
-                    if is_cooldown { continue; } // 쿨다운 깃발은 없는 것으로 인식하여 접근 시도 원천 차단
-
                     let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
                         n == flag.name() && (
                             o == &FlagOwnership::Both || 
@@ -1253,9 +1077,7 @@ impl Runner {
                         )
                     });
 
-                    if is_owned {
-                        owned_flags.push(flag.clone());
-                    } else {
+                    if !is_owned {
                         let dist_to_flag = battle_core::physics::utils::distance_between_points(&soldier.world_point(), &flag.position()).meters() as f32;
                         
                         let mut allies_at_flag = 0;
@@ -1295,7 +1117,7 @@ impl Runner {
 
                         for (ping_grid, (_, ping_side)) in &self.tactical_pings {
                             if ping_side != soldier.side() {
-                                 let ping_world = map.world_point_from_grid_point(*ping_grid);
+                                let ping_world = map.world_point_from_grid_point(*ping_grid);
                                 let dist_to_ping = battle_core::physics::utils::distance_between_points(&flag.position(), &ping_world).meters() as f32;
                                 if dist_to_ping <= 40.0 {
                                     risk_score += 2000.0; 
@@ -1319,7 +1141,7 @@ impl Runner {
                         let priority_score = if is_scout {
                             10000.0 - distance_penalty
                         } else {
-                             10000.0 - distance_penalty - risk_score
+                            10000.0 - distance_penalty - risk_score
                         };
 
                         if priority_score > best_score {
@@ -1329,75 +1151,8 @@ impl Runner {
                     }
                 }
 
-                // [신규 & 개선] 전방과 후방을 기준으로 순환구조를 반영합니다.
-                let mut friendly_squad_ys = vec![];
-                for (sq_uuid, sq_comp) in self.battle_state.squads() {
-                    let sq_leader = self.battle_state.soldier(sq_comp.leader());
-                    if sq_leader.side() == soldier.side() && sq_leader.alive() {
-                        friendly_squad_ys.push((*sq_uuid, sq_leader.world_point().y));
-                    }
-                }
-                
-                friendly_squad_ys.sort_by(|a, b| {
-                    if is_side_a {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    } else {
-                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                    }
-                });
-                
-                let half_idx = friendly_squad_ys.len() / 2;
-                let mut is_rear_squad = false;
-                if let Some(pos) = friendly_squad_ys.iter().position(|(sq, _)| sq == &soldier.squad_uuid()) {
-                    is_rear_squad = pos >= half_idx;
-                }
-
-                // 모든 비정찰조 분대가 교대/순환에 참여할 수 있도록 락 해제
-                let is_patrol_squad = !is_scout;
-
-                if is_patrol_squad && !owned_flags.is_empty() {
-                    // 점령한 깃발을 전방(Front)부터 후방(Rear) 순으로 정렬합니다.
-                    owned_flags.sort_by(|a, b| {
-                        if is_side_a {
-                            b.position().y.partial_cmp(&a.position().y).unwrap_or(std::cmp::Ordering::Equal)
-                        } else {
-                            a.position().y.partial_cmp(&b.position().y).unwrap_or(std::cmp::Ordering::Equal)
-                        }
-                    });
-                    
-                    let mut min_dist = std::f32::MAX;
-                    let mut closest_idx = 0;
-                    for (i, flag) in owned_flags.iter().enumerate() {
-                        let dist = battle_core::physics::utils::distance_between_points(&soldier.world_point(), &flag.position()).meters() as f32;
-                        if dist < min_dist {
-                            min_dist = dist;
-                            closest_idx = i;
-                        }
-                    }
-
-                    // [순환/교대 출발 로직]
-                    let target_idx = if min_dist < 15.0 {
-                        // 현재 어떤 깃발에 방어/대기 중이었다면 다음 후방 깃발로 순환
-                        (closest_idx + 1) % owned_flags.len()
-                    } else {
-                        if is_rear_squad {
-                            // 후방 분대는 무조건 최전방(0번) 깃발로 직행하여 게임 시작 즉시 교대 유발
-                            0
-                        } else {
-                            // 전방 분대는 자신이 지켜야 할 가장 가까운 깃발 사수
-                            closest_idx
-                        }
-                    };
-                    
-                    target_flag = Some(owned_flags[target_idx].clone());
-                } else {
-                    // 공격조(Attack Squad) 또는 정찰조(Scout), 혹은 보유 깃발이 없는 경우
-                    // 이미 위에서 계산된 best_score 기준 미점령/적 깃발을 타겟팅합니다.
-                    if target_flag.is_none() {
-                        if best_score < 0.0 && weakest_flag.is_some() && !is_scout {
-                            target_flag = weakest_flag;
-                        }
-                    }
+                if best_score < 0.0 && weakest_flag.is_some() && !is_scout {
+                    target_flag = weakest_flag;
                 }
 
                 if let Some(flag) = target_flag {
@@ -1485,15 +1240,9 @@ impl Runner {
                                 let flag_grid = map.grid_point_from_world_point(&flag.position());
                                 if let Some(flag_path) = find_tactical_path(&self.config, map, &to_grid, &flag_grid, true, &PathMode::Walk, &None, &tactical_costs) {
                                     let wp = flag_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
-                                    // [순환 대기 반영] CQB 우회 후 깃발 도달 시 방어 대기 모드로 전환
-                                    Some(Box::new(Order::MoveFastTo(WorldPaths::new(vec![WorldPath::new(wp)]), Some(Box::new(Order::Defend(battle_core::types::Angle(0.0)))))))
-                                } else { 
-                                    Some(Box::new(Order::Defend(battle_core::types::Angle(0.0)))) 
-                                }
-                            } else { 
-                                // [순환 대기 반영] 일반 경로를 통해 깃발 도달 시 방어 대기 모드로 전환
-                                Some(Box::new(Order::Defend(battle_core::types::Angle(0.0)))) 
-                            };
+                                    Some(Box::new(Order::MoveFastTo(WorldPaths::new(vec![WorldPath::new(wp)]), None)))
+                                } else { None }
+                            } else { None };
 
                             let world_path = grid_path
                                 .iter()
@@ -1551,13 +1300,8 @@ impl Runner {
                             return Behavior::Idle(Body::Crouched);
                         }
                     } else {
-                        // [순환 대기 반영] 이미 깃발 위치에 도달했다면, 순환 대기 타이머를 작동시키기 위해 방어(Defend) 오더로 즉각 전환합니다.
-                        let new_order = Order::Defend(battle_core::types::Angle(0.0));
-                        messages.push(RunnerMessage::BattleState(BattleStateMessage::Soldier(
-                            soldier.uuid(),
-                            SoldierMessage::SetOrder(new_order)
-                        )));
-                        return Behavior::Defend(battle_core::types::Angle(0.0));
+                        // [버그 수정] 이미 깃발 위치에 도달했다면, 무의미하게 체크포인트로 돌아가지 않고 그 자리에서 대기하며 점령합니다.
+                        return Behavior::Idle(Body::Crouched);
                     }
                 }
                 

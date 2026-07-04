@@ -21,23 +21,6 @@ impl Runner {
         // [Tactical Routing] 전술 길찾기를 위한 동적 위협/안전 가중치 맵 생성
         let mut tactical_costs = std::collections::HashMap::new();
 
-        let mut all_flags_owned = true;
-        for flag in map.flags() {
-            let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
-                n == flag.name() && (
-                    o == &battle_core::game::flag::FlagOwnership::Both || 
-                    (leader.side() == &battle_core::game::Side::A && o == &battle_core::game::flag::FlagOwnership::A) ||
-                    (leader.side() == &battle_core::game::Side::B && o == &battle_core::game::flag::FlagOwnership::B)
-                )
-            });
-            if !is_owned {
-                all_flags_owned = false;
-                break;
-            }
-        }
-
-        
-
         // [핵심 버그 수정: 위험 사로 네비게이션 무시 현상 해결]
         // 기존에는 idle_behavior(YOLO)에만 적용되고, 실제 강제 이동(Move/FastMove) 경로를 생성하는 A* 알고리즘에는 전술 핑이 누락되어 있었습니다.
         for (ping_grid, (_, ping_side)) in &self.tactical_pings {
@@ -68,23 +51,22 @@ impl Runner {
             }
         }
 
-        // 2. 적군 시야 및 사격 사로(위협 구역) 패널티 부여 (반경 약 60m 적용)
-        // [요청 반영] 이동시에는 무조건 유효 사거리 밖으로 이동 되게 반영해야되
+        // 2. 적군 시야 및 사격 사로(위협 구역) 패널티 부여 (반경 약 30m)
         for enemy in self.battle_state.soldiers().iter().filter(|s| s.side() != leader.side() && s.alive()) {
             let enemy_grid = map.grid_point_from_world_point(&enemy.world_point());
-            // 반경 약 60m (유효 사거리 밖)으로 우회 강제 (그리드 크기 30x30 -> 60x60 대폭 확장)
-            let threat_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 60, 60);
+            let threat_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 30, 30);
             for tg in threat_grids {
                 if let Some(tile) = map.terrain_tiles().get((tg.y * map.width() as i32 + tg.x) as usize) {
                     let opacity = self.config.terrain_tile_opacity(&tile.type_);
-                    // 유효 사거리 내부는 진입 자체를 극도로 억제하여 밖으로 돌게 함
+                    // [개선] 평야(엄폐물 없는 타일)에서 적 시야에 노출될 경우 이동 비용(Cost) 극단적 증가 (+500) -> 가장 가까운 숲으로 우회 유도
                     if opacity < 0.1 {
-                        *tactical_costs.entry(tg).or_insert(0) += 10000;
+                        *tactical_costs.entry(tg).or_insert(0) += 500;
                     } else {
-                        *tactical_costs.entry(tg).or_insert(0) += 5000;
+                        // 숲이나 장애물이 있는 곳은 상대적으로 안전하므로 패널티 축소 (+20)
+                        *tactical_costs.entry(tg).or_insert(0) += 20;
                     }
                 } else {
-                    *tactical_costs.entry(tg).or_insert(0) += 5000;
+                    *tactical_costs.entry(tg).or_insert(0) += 100;
                 }
             }
         }

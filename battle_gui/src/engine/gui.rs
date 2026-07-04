@@ -239,28 +239,22 @@ impl Engine {
     }
 
     pub fn update_task_gui(&mut self, ctx: &mut Context) -> GameResult<()> {
-        // [추가] 각 Task에 할당된 분대가 전부 소멸(사망)하거나, 모든 분대원이 Idle(대기) 상태로 돌아갔는지 검사하여 대기열에서 자동 제거합니다.
+        // [추가] 각 Task에 할당된 분대가 전부 소멸(사망 등)했는지 검사하여 대기열에서 자동 제거합니다.
         let mut tasks_to_retain = vec![];
         for task in &self.gui_state.chat_tasks {
-            let mut any_squad_active_or_alive = false;
+            let mut any_squad_alive = false;
             for squad_id in &task.2 {
                 if let Some(squad) = self.battle_state.squads().get(squad_id) {
-                    let active_members_count = squad.members().iter().filter(|&&m| {
-                        if m.0 < self.battle_state.soldiers().len() {
-                            let soldier = self.battle_state.soldier(m);
-                            // 살아서 무언가 명령을 수행 중(Idle이 아님)일 때만 Active로 간주
-                            soldier.alive() && !matches!(soldier.order(), battle_core::order::Order::Idle)
-                        } else {
-                            false
-                        }
+                    let alive_members_count = squad.members().iter().filter(|&&m| {
+                        m.0 < self.battle_state.soldiers().len() && self.battle_state.soldier(m).alive()
                     }).count();
-                    if active_members_count > 0 {
-                        any_squad_active_or_alive = true;
+                    if alive_members_count > 0 {
+                        any_squad_alive = true;
                         break;
                     }
                 }
             }
-            if any_squad_active_or_alive {
+            if any_squad_alive {
                 tasks_to_retain.push(task.clone());
             }
         }

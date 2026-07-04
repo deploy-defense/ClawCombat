@@ -60,15 +60,11 @@ impl Runner {
                 }
             }
             
-            // [수정] 전방/후방을 기준으로 진영 내 분대를 3개의 중대로 균등 분할합니다.
+            // [수정] 거리 기반 동적 그룹핑을 폐지하고, 맵의 Y축(상/중/하)을 기준으로 진영 내 분대를 3개의 중대로 균등 분할합니다.
             side_squads.sort_by(|a, b| {
                 let a_y = self.battle_state.soldier(self.battle_state.squad(*a).leader()).world_point().y;
                 let b_y = self.battle_state.soldier(self.battle_state.squad(*b).leader()).world_point().y;
-                if side == battle_core::game::Side::A {
-                    b_y.partial_cmp(&a_y).unwrap_or(std::cmp::Ordering::Equal) // A진영: Y가 클수록 전방 (내림차순)
-                } else {
-                    a_y.partial_cmp(&b_y).unwrap_or(std::cmp::Ordering::Equal) // B진영: Y가 작을수록 전방 (오름차순)
-                }
+                a_y.partial_cmp(&b_y).unwrap_or(std::cmp::Ordering::Equal)
             });
 
             let mut clusters: Vec<Vec<battle_core::types::SquadUuid>> = vec![];
