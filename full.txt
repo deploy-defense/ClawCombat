@@ -6204,6 +6204,7 @@ pub fn find_path(
                                 crate::map::terrain::TileType::BrickWall |
                                 crate::map::terrain::TileType::Trunk |
                                 crate::map::terrain::TileType::MiddleRock |
+                                crate::map::terrain::TileType::MiddleWoodLogs |
                                 crate::map::terrain::TileType::Hedge => {
                                     near_cover_bonus = 5; // [수정] 무리한 우회를 막기 위해 자석 효과를 40 -> 5로 축소합니다.
                                     break;
@@ -6269,6 +6270,7 @@ pub fn find_tactical_path(
                                 crate::map::terrain::TileType::BrickWall |
                                 crate::map::terrain::TileType::Trunk |
                                 crate::map::terrain::TileType::MiddleRock |
+                                crate::map::terrain::TileType::MiddleWoodLogs |
                                 crate::map::terrain::TileType::Hedge => {
                                     near_cover_bonus = 5; // [수정] 무리한 우회를 막기 위해 자석 효과를 40 -> 5로 축소합니다.
                                     break;
@@ -6281,14 +6283,12 @@ pub fn find_tactical_path(
                 
                 let mut final_cost = *cost - near_cover_bonus;
 
-                // 전술적 위협/안전 가중치 맵을 조회하여 타일 이동 비용을 동적으로 증감합니다.
-                if let Some(extra_cost) = tactical_costs.get(&succ_node.0) {
-                    final_cost += extra_cost;
+                if let Some(tactical_cost) = tactical_costs.get(&succ_node.0) {
+                    final_cost += tactical_cost;
                 }
-                *cost = final_cost.max(1); // 이동 비용은 A* 무한 루프 방지를 위해 최소 1로 보정
+                *cost = final_cost.max(1);
             }
-            // [위험 사로 진입 원천 차단 및 연산 지연(느려짐) 해결]
-            // 맵 전체가 고착되는 것을 막기 위해 하드 블록 비용 컷을 2000에서 10000으로 올려 길 자체는 뚫릴 수 있게 허용합니다.
+            
             successors.retain(|(_, cost)| *cost < 10000);
             successors
         },
@@ -6343,6 +6343,7 @@ pub fn find_stealth_path(
                                 crate::map::terrain::TileType::BrickWall |
                                 crate::map::terrain::TileType::Trunk |
                                 crate::map::terrain::TileType::MiddleRock |
+                                crate::map::terrain::TileType::MiddleWoodLogs |
                                 crate::map::terrain::TileType::Hedge => {
                                     near_cover_bonus = 40;
                                     break;
@@ -12977,22 +12978,28 @@ impl Engine {
     }
 
     pub fn update_task_gui(&mut self, ctx: &mut Context) -> GameResult<()> {
-        // [추가] 각 Task에 할당된 분대가 전부 소멸(사망 등)했는지 검사하여 대기열에서 자동 제거합니다.
+        // [추가] 각 Task에 할당된 분대가 전부 소멸(사망)하거나, 모든 분대원이 Idle(대기) 상태로 돌아갔는지 검사하여 대기열에서 자동 제거합니다.
         let mut tasks_to_retain = vec![];
         for task in &self.gui_state.chat_tasks {
-            let mut any_squad_alive = false;
+            let mut any_squad_active_or_alive = false;
             for squad_id in &task.2 {
                 if let Some(squad) = self.battle_state.squads().get(squad_id) {
-                    let alive_members_count = squad.members().iter().filter(|&&m| {
-                        m.0 < self.battle_state.soldiers().len() && self.battle_state.soldier(m).alive()
+                    let active_members_count = squad.members().iter().filter(|&&m| {
+                        if m.0 < self.battle_state.soldiers().len() {
+                            let soldier = self.battle_state.soldier(m);
+                            // 살아서 무언가 명령을 수행 중(Idle이 아님)일 때만 Active로 간주
+                            soldier.alive() && !matches!(soldier.order(), battle_core::order::Order::Idle)
+                        } else {
+                            false
+                        }
                     }).count();
-                    if alive_members_count > 0 {
-                        any_squad_alive = true;
+                    if active_members_count > 0 {
+                        any_squad_active_or_alive = true;
                         break;
                     }
                 }
             }
-            if any_squad_alive {
+            if any_squad_active_or_alive {
                 tasks_to_retain.push(task.clone());
             }
         }
@@ -24123,6 +24130,31 @@ impl Runner {
                 }
 
                 let mut tactical_costs = std::collections::HashMap::new();
+
+                let mut all_flags_owned = true;
+                for flag in map.flags() {
+                    let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
+                        n == flag.name() && (
+                            o == &battle_core::game::flag::FlagOwnership::Both || 
+                            (soldier.side() == &battle_core::game::Side::A && o == &battle_core::game::flag::FlagOwnership::A) ||
+                            (soldier.side() == &battle_core::game::Side::B && o == &battle_core::game::flag::FlagOwnership::B)
+                        )
+                    });
+                    if !is_owned {
+                        all_flags_owned = false;
+                        break;
+                    }
+                }
+
+                // [요청 반영] 절대 흙길 제외, 숲으로만 이동하게 진행하고 만약에 흙길을 가는 경우는 해당 flag가 점령된경우를 제외하고는 절대 흙길을 가지 않게
+                if !all_flags_owned {
+                    for tile in map.terrain_tiles() {
+                        if matches!(tile.type_(), battle_core::map::terrain::TileType::Dirt | battle_core::map::terrain::TileType::ShortGrass | battle_core::map::terrain::TileType::MiddleGrass | battle_core::map::terrain::TileType::HighGrass | battle_core::map::terrain::TileType::Concrete | battle_core::map::terrain::TileType::Mud) {
+                            let tg = battle_core::types::GridPoint::new(tile.x as i32, tile.y as i32);
+                            *tactical_costs.entry(tg).or_insert(0) += 50000;
+                        }
+                    }
+                }
                 
                 // [Step 1: Tactical Ping] 사격이 발생했던 적 원점(위험 사로)을 접근 금지 구역으로 설정
                 for (ping_grid, (_, ping_side)) in &self.tactical_pings {
@@ -24139,20 +24171,20 @@ impl Runner {
                 for enemy in self.battle_state.soldiers().iter().filter(|s| s.side() != soldier.side() && s.alive()) {
                     let enemy_grid = map.grid_point_from_world_point(&enemy.world_point());
                     
-                    // 중심부는 극도의 위험(Center Risk), 외곽은 우회(Edge) 영역으로 분리하여 칠함
-                    let core_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 15, 15);
-                    let edge_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 35, 35);
+                    // [요청 반영] 이동시에는 무조건 유효 사거리 밖으로 이동 되게 반영 (반경 약 60m 적용)
+                    let core_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 60, 60);
+                    let edge_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 80, 80);
                     
                     for eg in edge_grids {
                         // Edge 영역은 상대적으로 낮은 우회 비용 부여 (가장자리를 타도록 유도)
-                        *tactical_costs.entry(eg).or_insert(0) += 20; 
+                        *tactical_costs.entry(eg).or_insert(0) += 500; 
                     }
                     for cg in core_grids {
                         if let Some(tile) = map.terrain_tiles().get((cg.y * map.width() as i32 + cg.x) as usize) {
                             if self.config.terrain_tile_opacity(&tile.type_) < 0.1 {
-                                *tactical_costs.entry(cg).or_insert(0) += 1000; // 중심부 평야는 절대 진입 금지(Risk Max)
+                                *tactical_costs.entry(cg).or_insert(0) += 10000; // 중심부 평야는 절대 진입 금지(Risk Max)
                             } else {
-                                *tactical_costs.entry(cg).or_insert(0) += 200; // 숲이더라도 중심부면 회피
+                                *tactical_costs.entry(cg).or_insert(0) += 5000; // 숲이더라도 중심부면 강력 회피
                             }
                         }
                     }
@@ -24861,6 +24893,23 @@ impl Runner {
         // [Tactical Routing] 전술 길찾기를 위한 동적 위협/안전 가중치 맵 생성
         let mut tactical_costs = std::collections::HashMap::new();
 
+        let mut all_flags_owned = true;
+        for flag in map.flags() {
+            let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
+                n == flag.name() && (
+                    o == &battle_core::game::flag::FlagOwnership::Both || 
+                    (leader.side() == &battle_core::game::Side::A && o == &battle_core::game::flag::FlagOwnership::A) ||
+                    (leader.side() == &battle_core::game::Side::B && o == &battle_core::game::flag::FlagOwnership::B)
+                )
+            });
+            if !is_owned {
+                all_flags_owned = false;
+                break;
+            }
+        }
+
+        
+
         // [핵심 버그 수정: 위험 사로 네비게이션 무시 현상 해결]
         // 기존에는 idle_behavior(YOLO)에만 적용되고, 실제 강제 이동(Move/FastMove) 경로를 생성하는 A* 알고리즘에는 전술 핑이 누락되어 있었습니다.
         for (ping_grid, (_, ping_side)) in &self.tactical_pings {
@@ -24891,22 +24940,23 @@ impl Runner {
             }
         }
 
-        // 2. 적군 시야 및 사격 사로(위협 구역) 패널티 부여 (반경 약 30m)
+        // 2. 적군 시야 및 사격 사로(위협 구역) 패널티 부여 (반경 약 60m 적용)
+        // [요청 반영] 이동시에는 무조건 유효 사거리 밖으로 이동 되게 반영해야되
         for enemy in self.battle_state.soldiers().iter().filter(|s| s.side() != leader.side() && s.alive()) {
             let enemy_grid = map.grid_point_from_world_point(&enemy.world_point());
-            let threat_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 30, 30);
+            // 반경 약 60m (유효 사거리 밖)으로 우회 강제 (그리드 크기 30x30 -> 60x60 대폭 확장)
+            let threat_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 60, 60);
             for tg in threat_grids {
                 if let Some(tile) = map.terrain_tiles().get((tg.y * map.width() as i32 + tg.x) as usize) {
                     let opacity = self.config.terrain_tile_opacity(&tile.type_);
-                    // [개선] 평야(엄폐물 없는 타일)에서 적 시야에 노출될 경우 이동 비용(Cost) 극단적 증가 (+500) -> 가장 가까운 숲으로 우회 유도
+                    // 유효 사거리 내부는 진입 자체를 극도로 억제하여 밖으로 돌게 함
                     if opacity < 0.1 {
-                        *tactical_costs.entry(tg).or_insert(0) += 500;
+                        *tactical_costs.entry(tg).or_insert(0) += 10000;
                     } else {
-                        // 숲이나 장애물이 있는 곳은 상대적으로 안전하므로 패널티 축소 (+20)
-                        *tactical_costs.entry(tg).or_insert(0) += 20;
+                        *tactical_costs.entry(tg).or_insert(0) += 5000;
                     }
                 } else {
-                    *tactical_costs.entry(tg).or_insert(0) += 100;
+                    *tactical_costs.entry(tg).or_insert(0) += 5000;
                 }
             }
         }
@@ -26850,17 +26900,7 @@ impl Runner {
                     };
                     let to_grid = map.grid_point_from_world_point(atk_pt);
                     
-                    if let Some(grid_path) = battle_core::physics::path::find_path(
-                        &self.config, map, &from_grid, &to_grid, true, &battle_core::physics::path::PathMode::Walk, &None
-                    ) {
-                        let world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
-                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(world_path)]);
-                        base_order = Some(battle_core::order::Order::SneakTo(paths, base_order.map(Box::new)));
-                    } else {
-                        // 길을 못 찾았더라도 직선거리 강제 이동 오더 배정 (Fallback)
-                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(vec![map.world_point_from_grid_point(from_grid), *atk_pt])]);
-                        base_order = Some(battle_core::order::Order::SneakTo(paths, base_order.map(Box::new)));
-                    }
+                    
                 }
 
                 // 이동 위치가 있으면 MoveFastTo 적용 후 Then으로 공격 위치 포복 이동 연결
@@ -27218,68 +27258,64 @@ impl Runner {
 
                         let leader_pos = leader.world_point();
                         let mut target_point = battle_core::types::WorldPoint::new(leader_pos.x + 100.0, leader_pos.y + 100.0);
+                        let map = self.battle_state.map();
 
-                        // [우회 기동(FlankTo) 로직] 적군이나 건물을 중심축으로 삼아 사격선에서 이탈하는 경로 생성
+                        // [우회 기동(FlankTo) 로직 개선] 적을 거대한 건물(장애물)로 취급하여 사격 반경을 우회하도록 강제하는 별도 Move 루트 생성
+                        let mut tactical_costs = std::collections::HashMap::new();
                         if best_variant == "FlankTo" {
                             let mut axis_center = None;
                             let mut min_dist = std::f32::MAX;
 
-                            // 1. 가장 가까운 적을 중심축으로 설정
                             for enemy in self.battle_state.soldiers() {
                                 if enemy.side() != leader.side() && enemy.alive() {
                                     let dist = (enemy.world_point().to_vec2() - leader_pos.to_vec2()).length();
                                     if dist < min_dist {
                                         min_dist = dist;
-                                        axis_center = Some(enemy.world_point().to_vec2());
+                                        axis_center = Some(enemy.world_point());
                                     }
                                 }
                             }
 
-                            // 2. 적이 없으면 가장 가까운 건물을 중심축으로 설정
-                            if axis_center.is_none() {
-                                for interior in self.battle_state.map().interiors() {
-                                    let cx = interior.x() + interior.width() / 2.0;
-                                    let cy = interior.y() + interior.height() / 2.0;
-                                    let dist = (glam::Vec2::new(cx, cy) - leader_pos.to_vec2()).length();
-                                    if dist < min_dist {
-                                        min_dist = dist;
-                                        axis_center = Some(glam::Vec2::new(cx, cy));
-                                    }
-                                }
-                            }
-
-                            if let Some(center) = axis_center {
-                                let dir = if (center - leader_pos.to_vec2()).length() > 0.1 {
-                                    (center - leader_pos.to_vec2()).normalize()
+                            if let Some(center_point) = axis_center {
+                                // 1. 타겟 목표점 갱신: 적 위치를 조금 넘어선 후방 지점으로 배정
+                                let dir = if (center_point.to_vec2() - leader_pos.to_vec2()).length() > 0.1 {
+                                    (center_point.to_vec2() - leader_pos.to_vec2()).normalize()
                                 } else {
                                     glam::Vec2::new(1.0, 0.0)
                                 };
-
-                                // 사격선(직선)에서 벗어나기 위해 90도 측면 벡터 도출 (분대 UUID 홀짝으로 좌우 분배)
-                                let perp_dir = if squad.leader().0 % 2 == 0 {
-                                    glam::Vec2::new(-dir.y, dir.x)
-                                } else {
-                                    glam::Vec2::new(dir.y, -dir.x)
-                                };
-
-                                // 사선에서 벗어나는 크기(약 50m = 166픽셀)만큼 측면으로 빠짐
-                                let flank_vec = leader_pos.to_vec2() + perp_dir * 166.0 + dir * 50.0;
-                                
-                                let map_w = self.battle_state.map().visual_width() as f32 - 30.0;
-                                let map_h = self.battle_state.map().visual_height() as f32 - 30.0;
+                                let flank_target = center_point.to_vec2() + dir * 150.0;
+                                let map_w = map.visual_width() as f32 - 30.0;
+                                let map_h = map.visual_height() as f32 - 30.0;
                                 target_point = battle_core::types::WorldPoint::new(
-                                    flank_vec.x.clamp(30.0, map_w.max(30.0)),
-                                    flank_vec.y.clamp(30.0, map_h.max(30.0))
+                                    flank_target.x.clamp(30.0, map_w.max(30.0)),
+                                    flank_target.y.clamp(30.0, map_h.max(30.0))
                                 );
-                                println!("[LLM Bridge] 우회 기동 경로 계산 완료: 사선 이탈 및 측면 타격점 생성");
+
+                                // 2. 사격에서 벗어나는 크기(약 반경 50m = 150픽셀 = 5칸)를 건물과 동일한 극한 패널티 구역으로 도배
+                                let enemy_grid = map.grid_point_from_world_point(&center_point);
+                                let threat_radius = 5; 
+                                let danger_grids = battle_core::utils::grid_points_for_square(&enemy_grid, threat_radius * 2, threat_radius * 2);
+                                for dg in danger_grids {
+                                    *tactical_costs.entry(dg).or_insert(0) += 10000;
+                                }
+                                println!("[LLM Bridge] 우회 기동(FlankTo) 별도 루트 적용: 적을 거대한 건물(장애물)로 취급하여 사격 반경 우회를 강제합니다.");
                             }
                         }
 
-                        let grid_path = vec![
-                            battle_core::types::WorldPoint::new(leader_pos.x, leader_pos.y),
-                            target_point,
-                        ];
-                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(grid_path)]);
+                        // A* 기반의 전술 경로 탐색을 실행하여 가상 건물(적의 사거리)을 자연스럽게 피하는 우회 기동 루트 도출
+                        let from_grid = map.grid_point_from_world_point(&leader_pos);
+                        let to_grid = map.grid_point_from_world_point(&target_point);
+                        let mut final_world_path = vec![battle_core::types::WorldPoint::new(leader_pos.x, leader_pos.y), target_point]; // Fallback 직선거리
+
+                        if best_variant == "FlankTo" && from_grid != to_grid {
+                            if let Some(grid_path) = battle_core::physics::path::find_tactical_path(
+                                &self.config, map, &from_grid, &to_grid, true, &battle_core::physics::path::PathMode::Walk, &None, &tactical_costs
+                            ) {
+                                final_world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
+                            }
+                        }
+
+                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(final_world_path)]);
 
                         let then_order = if has_return_intent {
                             println!("[LLM Bridge] 연계 복귀 의도 임베딩 감지: Move 이후 전환할 예약 오더(Order::Defend)를 주입합니다.");

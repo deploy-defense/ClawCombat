@@ -981,6 +981,31 @@ impl Runner {
                 }
 
                 let mut tactical_costs = std::collections::HashMap::new();
+
+                let mut all_flags_owned = true;
+                for flag in map.flags() {
+                    let is_owned = self.battle_state.flags().ownerships().iter().any(|(n, o)| {
+                        n == flag.name() && (
+                            o == &battle_core::game::flag::FlagOwnership::Both || 
+                            (soldier.side() == &battle_core::game::Side::A && o == &battle_core::game::flag::FlagOwnership::A) ||
+                            (soldier.side() == &battle_core::game::Side::B && o == &battle_core::game::flag::FlagOwnership::B)
+                        )
+                    });
+                    if !is_owned {
+                        all_flags_owned = false;
+                        break;
+                    }
+                }
+
+                // [요청 반영] 절대 흙길 제외, 숲으로만 이동하게 진행하고 만약에 흙길을 가는 경우는 해당 flag가 점령된경우를 제외하고는 절대 흙길을 가지 않게
+                if !all_flags_owned {
+                    for tile in map.terrain_tiles() {
+                        if matches!(tile.type_(), battle_core::map::terrain::TileType::Dirt | battle_core::map::terrain::TileType::ShortGrass | battle_core::map::terrain::TileType::MiddleGrass | battle_core::map::terrain::TileType::HighGrass | battle_core::map::terrain::TileType::Concrete | battle_core::map::terrain::TileType::Mud) {
+                            let tg = battle_core::types::GridPoint::new(tile.x as i32, tile.y as i32);
+                            *tactical_costs.entry(tg).or_insert(0) += 50000;
+                        }
+                    }
+                }
                 
                 // [Step 1: Tactical Ping] 사격이 발생했던 적 원점(위험 사로)을 접근 금지 구역으로 설정
                 for (ping_grid, (_, ping_side)) in &self.tactical_pings {
@@ -997,20 +1022,20 @@ impl Runner {
                 for enemy in self.battle_state.soldiers().iter().filter(|s| s.side() != soldier.side() && s.alive()) {
                     let enemy_grid = map.grid_point_from_world_point(&enemy.world_point());
                     
-                    // 중심부는 극도의 위험(Center Risk), 외곽은 우회(Edge) 영역으로 분리하여 칠함
-                    let core_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 15, 15);
-                    let edge_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 35, 35);
+                    // [요청 반영] 이동시에는 무조건 유효 사거리 밖으로 이동 되게 반영 (반경 약 60m 적용)
+                    let core_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 60, 60);
+                    let edge_grids = battle_core::utils::grid_points_for_square(&enemy_grid, 80, 80);
                     
                     for eg in edge_grids {
                         // Edge 영역은 상대적으로 낮은 우회 비용 부여 (가장자리를 타도록 유도)
-                        *tactical_costs.entry(eg).or_insert(0) += 20; 
+                        *tactical_costs.entry(eg).or_insert(0) += 500; 
                     }
                     for cg in core_grids {
                         if let Some(tile) = map.terrain_tiles().get((cg.y * map.width() as i32 + cg.x) as usize) {
                             if self.config.terrain_tile_opacity(&tile.type_) < 0.1 {
-                                *tactical_costs.entry(cg).or_insert(0) += 1000; // 중심부 평야는 절대 진입 금지(Risk Max)
+                                *tactical_costs.entry(cg).or_insert(0) += 10000; // 중심부 평야는 절대 진입 금지(Risk Max)
                             } else {
-                                *tactical_costs.entry(cg).or_insert(0) += 200; // 숲이더라도 중심부면 회피
+                                *tactical_costs.entry(cg).or_insert(0) += 5000; // 숲이더라도 중심부면 강력 회피
                             }
                         }
                     }

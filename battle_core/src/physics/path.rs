@@ -185,6 +185,7 @@ pub fn find_path(
                                 crate::map::terrain::TileType::BrickWall |
                                 crate::map::terrain::TileType::Trunk |
                                 crate::map::terrain::TileType::MiddleRock |
+                                crate::map::terrain::TileType::MiddleWoodLogs |
                                 crate::map::terrain::TileType::Hedge => {
                                     near_cover_bonus = 5; // [수정] 무리한 우회를 막기 위해 자석 효과를 40 -> 5로 축소합니다.
                                     break;
@@ -250,6 +251,7 @@ pub fn find_tactical_path(
                                 crate::map::terrain::TileType::BrickWall |
                                 crate::map::terrain::TileType::Trunk |
                                 crate::map::terrain::TileType::MiddleRock |
+                                crate::map::terrain::TileType::MiddleWoodLogs |
                                 crate::map::terrain::TileType::Hedge => {
                                     near_cover_bonus = 5; // [수정] 무리한 우회를 막기 위해 자석 효과를 40 -> 5로 축소합니다.
                                     break;
@@ -262,14 +264,12 @@ pub fn find_tactical_path(
                 
                 let mut final_cost = *cost - near_cover_bonus;
 
-                // 전술적 위협/안전 가중치 맵을 조회하여 타일 이동 비용을 동적으로 증감합니다.
-                if let Some(extra_cost) = tactical_costs.get(&succ_node.0) {
-                    final_cost += extra_cost;
+                if let Some(tactical_cost) = tactical_costs.get(&succ_node.0) {
+                    final_cost += tactical_cost;
                 }
-                *cost = final_cost.max(1); // 이동 비용은 A* 무한 루프 방지를 위해 최소 1로 보정
+                *cost = final_cost.max(1);
             }
-            // [위험 사로 진입 원천 차단 및 연산 지연(느려짐) 해결]
-            // 맵 전체가 고착되는 것을 막기 위해 하드 블록 비용 컷을 2000에서 10000으로 올려 길 자체는 뚫릴 수 있게 허용합니다.
+            
             successors.retain(|(_, cost)| *cost < 10000);
             successors
         },
@@ -324,6 +324,7 @@ pub fn find_stealth_path(
                                 crate::map::terrain::TileType::BrickWall |
                                 crate::map::terrain::TileType::Trunk |
                                 crate::map::terrain::TileType::MiddleRock |
+                                crate::map::terrain::TileType::MiddleWoodLogs |
                                 crate::map::terrain::TileType::Hedge => {
                                     near_cover_bonus = 40;
                                     break;

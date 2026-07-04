@@ -187,17 +187,7 @@ impl Runner {
                     };
                     let to_grid = map.grid_point_from_world_point(atk_pt);
                     
-                    if let Some(grid_path) = battle_core::physics::path::find_path(
-                        &self.config, map, &from_grid, &to_grid, true, &battle_core::physics::path::PathMode::Walk, &None
-                    ) {
-                        let world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
-                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(world_path)]);
-                        base_order = Some(battle_core::order::Order::SneakTo(paths, base_order.map(Box::new)));
-                    } else {
-                        // 길을 못 찾았더라도 직선거리 강제 이동 오더 배정 (Fallback)
-                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(vec![map.world_point_from_grid_point(from_grid), *atk_pt])]);
-                        base_order = Some(battle_core::order::Order::SneakTo(paths, base_order.map(Box::new)));
-                    }
+                    
                 }
 
                 // 이동 위치가 있으면 MoveFastTo 적용 후 Then으로 공격 위치 포복 이동 연결
@@ -555,68 +545,64 @@ impl Runner {
 
                         let leader_pos = leader.world_point();
                         let mut target_point = battle_core::types::WorldPoint::new(leader_pos.x + 100.0, leader_pos.y + 100.0);
+                        let map = self.battle_state.map();
 
-                        // [우회 기동(FlankTo) 로직] 적군이나 건물을 중심축으로 삼아 사격선에서 이탈하는 경로 생성
+                        // [우회 기동(FlankTo) 로직 개선] 적을 거대한 건물(장애물)로 취급하여 사격 반경을 우회하도록 강제하는 별도 Move 루트 생성
+                        let mut tactical_costs = std::collections::HashMap::new();
                         if best_variant == "FlankTo" {
                             let mut axis_center = None;
                             let mut min_dist = std::f32::MAX;
 
-                            // 1. 가장 가까운 적을 중심축으로 설정
                             for enemy in self.battle_state.soldiers() {
                                 if enemy.side() != leader.side() && enemy.alive() {
                                     let dist = (enemy.world_point().to_vec2() - leader_pos.to_vec2()).length();
                                     if dist < min_dist {
                                         min_dist = dist;
-                                        axis_center = Some(enemy.world_point().to_vec2());
+                                        axis_center = Some(enemy.world_point());
                                     }
                                 }
                             }
 
-                            // 2. 적이 없으면 가장 가까운 건물을 중심축으로 설정
-                            if axis_center.is_none() {
-                                for interior in self.battle_state.map().interiors() {
-                                    let cx = interior.x() + interior.width() / 2.0;
-                                    let cy = interior.y() + interior.height() / 2.0;
-                                    let dist = (glam::Vec2::new(cx, cy) - leader_pos.to_vec2()).length();
-                                    if dist < min_dist {
-                                        min_dist = dist;
-                                        axis_center = Some(glam::Vec2::new(cx, cy));
-                                    }
-                                }
-                            }
-
-                            if let Some(center) = axis_center {
-                                let dir = if (center - leader_pos.to_vec2()).length() > 0.1 {
-                                    (center - leader_pos.to_vec2()).normalize()
+                            if let Some(center_point) = axis_center {
+                                // 1. 타겟 목표점 갱신: 적 위치를 조금 넘어선 후방 지점으로 배정
+                                let dir = if (center_point.to_vec2() - leader_pos.to_vec2()).length() > 0.1 {
+                                    (center_point.to_vec2() - leader_pos.to_vec2()).normalize()
                                 } else {
                                     glam::Vec2::new(1.0, 0.0)
                                 };
-
-                                // 사격선(직선)에서 벗어나기 위해 90도 측면 벡터 도출 (분대 UUID 홀짝으로 좌우 분배)
-                                let perp_dir = if squad.leader().0 % 2 == 0 {
-                                    glam::Vec2::new(-dir.y, dir.x)
-                                } else {
-                                    glam::Vec2::new(dir.y, -dir.x)
-                                };
-
-                                // 사선에서 벗어나는 크기(약 50m = 166픽셀)만큼 측면으로 빠짐
-                                let flank_vec = leader_pos.to_vec2() + perp_dir * 166.0 + dir * 50.0;
-                                
-                                let map_w = self.battle_state.map().visual_width() as f32 - 30.0;
-                                let map_h = self.battle_state.map().visual_height() as f32 - 30.0;
+                                let flank_target = center_point.to_vec2() + dir * 150.0;
+                                let map_w = map.visual_width() as f32 - 30.0;
+                                let map_h = map.visual_height() as f32 - 30.0;
                                 target_point = battle_core::types::WorldPoint::new(
-                                    flank_vec.x.clamp(30.0, map_w.max(30.0)),
-                                    flank_vec.y.clamp(30.0, map_h.max(30.0))
+                                    flank_target.x.clamp(30.0, map_w.max(30.0)),
+                                    flank_target.y.clamp(30.0, map_h.max(30.0))
                                 );
-                                println!("[LLM Bridge] 우회 기동 경로 계산 완료: 사선 이탈 및 측면 타격점 생성");
+
+                                // 2. 사격에서 벗어나는 크기(약 반경 50m = 150픽셀 = 5칸)를 건물과 동일한 극한 패널티 구역으로 도배
+                                let enemy_grid = map.grid_point_from_world_point(&center_point);
+                                let threat_radius = 5; 
+                                let danger_grids = battle_core::utils::grid_points_for_square(&enemy_grid, threat_radius * 2, threat_radius * 2);
+                                for dg in danger_grids {
+                                    *tactical_costs.entry(dg).or_insert(0) += 10000;
+                                }
+                                println!("[LLM Bridge] 우회 기동(FlankTo) 별도 루트 적용: 적을 거대한 건물(장애물)로 취급하여 사격 반경 우회를 강제합니다.");
                             }
                         }
 
-                        let grid_path = vec![
-                            battle_core::types::WorldPoint::new(leader_pos.x, leader_pos.y),
-                            target_point,
-                        ];
-                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(grid_path)]);
+                        // A* 기반의 전술 경로 탐색을 실행하여 가상 건물(적의 사거리)을 자연스럽게 피하는 우회 기동 루트 도출
+                        let from_grid = map.grid_point_from_world_point(&leader_pos);
+                        let to_grid = map.grid_point_from_world_point(&target_point);
+                        let mut final_world_path = vec![battle_core::types::WorldPoint::new(leader_pos.x, leader_pos.y), target_point]; // Fallback 직선거리
+
+                        if best_variant == "FlankTo" && from_grid != to_grid {
+                            if let Some(grid_path) = battle_core::physics::path::find_tactical_path(
+                                &self.config, map, &from_grid, &to_grid, true, &battle_core::physics::path::PathMode::Walk, &None, &tactical_costs
+                            ) {
+                                final_world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
+                            }
+                        }
+
+                        let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(final_world_path)]);
 
                         let then_order = if has_return_intent {
                             println!("[LLM Bridge] 연계 복귀 의도 임베딩 감지: Move 이후 전환할 예약 오더(Order::Defend)를 주입합니다.");
