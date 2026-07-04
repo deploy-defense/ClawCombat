@@ -526,6 +526,10 @@ impl GuiState {
                     // 필요시 추가 정리 로직
                 }
             }
+            GuiStateMessage::RemoveChatTaskByCommand(command) => {
+                // 명령 문자열이 일치하는 Task 제거 (실행 시작 시 연동)
+                self.chat_tasks.retain(|t| t.1 != *command);
+            }
         }
     }
 

@@ -78,6 +78,9 @@ impl Engine {
                             ClientStateMessage::RemoveChatTask(task_id) => {
                                 self.gui_state.react(&GuiStateMessage::RemoveChatTask(*task_id), ctx);
                             }
+                            ClientStateMessage::RemoveChatTaskByCommand(command) => {
+                                self.gui_state.react(&GuiStateMessage::RemoveChatTaskByCommand(command.clone()), ctx);
+                            }
                         }
                     }
                     OutputMessage::ChangeConfig(change_config) => {

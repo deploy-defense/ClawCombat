@@ -173,36 +173,26 @@ impl Engine {
                     }
                 } else {
                     // 입력값이 없을 경우 동적으로 불러온 템플릿 목록(없으면 고정 프리셋) 노출
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let templates = self.gui_state.available_templates.clone();
+                        let mut clicked_template = None;
+
                         if templates.is_empty() {
                             if ui.button("즉각 대응 사격").clicked() {
-                                messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("suppress_fire".to_string()))));
+                                clicked_template = Some("suppress_fire".to_string());
                             }
                             if ui.button("은밀 우회 기동").clicked() {
-                                messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some("sneak_flank".to_string()))));
+                                clicked_template = Some("sneak_flank".to_string());
                             }
                         } else {
                             for template in templates {
                                 if ui.button(&template).clicked() {
-                                    messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(Some(template.clone()))));
+                                    clicked_template = Some(template.clone());
                                 }
                             }
                         }
-                        
-                        if ui.button("취소").clicked() {
-                            messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
-                        }
-                    });
 
-                    // 특정 템플릿을 수동으로 클릭(선택)했을 때만 확정 메뉴를 펼쳐줍니다.
-                    if let Some(selected) = self.gui_state.selected_template_to_confirm.clone() {
-                        ui.separator();
-                        ui.label(format!("선택된 템플릿: [{}]", selected));
-                        ui.label("적의 전술을 무력화(Counter)할 수 있는지 확인 후 확정하십시오.");
-                        
-                        if ui.button("✔ 전술 확정 및 실행").clicked() {
-                            // 확정 시 엔진에 넘기기 전에 대상 분대를 추출하여 Task UI 큐에 등록
+                        if let Some(selected) = clicked_template {
                             let mut target_squads = vec![];
                             let selected_squads = self.gui_state.selected_squads();
                             
@@ -222,12 +212,16 @@ impl Engine {
                                 messages.push(EngineMessage::GuiState(GuiStateMessage::AddChatTask(selected.clone(), target_squads)));
                             }
 
-                            // 확정 시 엔진에 넘기고 상태를 초기화합니다.
+                            // 불필요한 확정 절차를 생략하고 곧바로 실행합니다.
                             messages.push(EngineMessage::SendChatCommand(selected.clone()));
+                            messages.push(EngineMessage::GuiState(GuiStateMessage::ToggleChatGui));
+                        }
+                        
+                        if ui.button("취소").clicked() {
                             messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
                             messages.push(EngineMessage::GuiState(GuiStateMessage::ToggleChatGui));
                         }
-                    }
+                    });
                 }
             });
 

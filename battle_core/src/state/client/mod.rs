@@ -11,4 +11,5 @@ pub enum ClientStateMessage {
     BattleStarted,
     AddChatTask(String, Vec<crate::types::SquadUuid>),
     RemoveChatTask(usize),
+    RemoveChatTaskByCommand(String),
 }

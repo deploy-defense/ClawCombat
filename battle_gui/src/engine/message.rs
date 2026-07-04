@@ -71,4 +71,5 @@ pub enum GuiStateMessage {
     SetTacticSuggestions(Vec<(String, String, f32)>),
     AddChatTask(String, Vec<SquadUuid>),
     RemoveChatTask(usize),
+    RemoveChatTaskByCommand(String),
 }

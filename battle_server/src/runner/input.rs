@@ -89,19 +89,21 @@ impl Runner {
         // [신규 추가: 직접 클릭 기반 명령어 LLM 바이패스 및 즉시 실행]
         // 입력 내용이 오직 클릭 기반(분대, 이동, 공격 토큰)으로만 구성되어 있다면 LLM을 생략하고 즉시 실행합니다.
         let tokens: Vec<&str> = command.split_whitespace().collect();
-        // 템플릿 ID(예: suppress_fire, sneak_flank 등)도 직접 명령으로 인식하도록 확장
+        
+        let mut matched_template_id = None;
         let is_template_command = !tokens.is_empty() && tokens.iter().any(|t| {
-            // 템플릿 ID 매칭 (tactic_manager의 템플릿 ID 목록과 비교)
             if let Some(tm) = &self.tactic_manager {
-                tm.templates.iter().any(|template| template.id == *t)
-            } else {
-                false
+                if tm.templates.iter().any(|template| template.id == *t) {
+                    matched_template_id = Some(t.to_string());
+                    return true;
+                }
             }
+            false
         });
 
-        // @, &, #으로 시작하는 토큰으로만 이루어진 경우 직접 명령으로 처리 
-        // (템플릿 ID가 포함된 경우는 마크다운 본문을 주입하여 LLM 분석을 거쳐야 하므로 우회 대상에서 제외)
-        let is_direct_command = !tokens.is_empty() && tokens.iter().all(|t| t.starts_with('@') || t.starts_with('&') || t.starts_with('#'));
+        // @, &, #으로 시작하는 토큰으로만 이루어진 경우 또는 전술 템플릿 ID가 포함된 경우 직접 명령으로 처리
+        // (템플릿 ID가 포함된 경우 LLM을 우회하고 마크다운에 매핑된 확정 행동을 즉시 실행합니다)
+        let is_direct_command = !tokens.is_empty() && tokens.iter().all(|t| t.starts_with('@') || t.starts_with('&') || t.starts_with('#')) || is_template_command;
 
         if is_direct_command {
             println!("[LLM Bridge] 클릭 입력 감지! LLM/NLP 로직을 우회하고 명령을 즉시 실행합니다.");
@@ -173,9 +175,37 @@ impl Runner {
                 }
                 
                 let mut base_order = None;
+
+                // 템플릿 ID에 따른 확정적 오더(강제 액션) 바인딩
+                if let Some(template_id) = &matched_template_id {
+                    if template_id == "suppress_fire" || template_id == "flag_capture_openfield" {
+                        // 즉각 대응 사격 템플릿: 지정된 공격 위치나 타겟(없을 경우 임의의 방향)을 향해 즉시 제압 사격
+                        let target = attack_pts.last().copied().unwrap_or(battle_core::types::WorldPoint::new(0.0, 0.0));
+                        base_order = Some(battle_core::order::Order::SuppressFire(target));
+                    } else if template_id == "sneak_flank" {
+                        // 은밀 우회 기동 템플릿: 무조건 포복으로 기동
+                        let leader = self.battle_state.soldier(leader_idx);
+                        let from_grid = map.grid_point_from_world_point(&leader.world_point());
+                        let to_grid = if let Some(mv_pt) = move_pts.last() {
+                            map.grid_point_from_world_point(mv_pt)
+                        } else {
+                            from_grid
+                        };
+                        
+                        if let Some(grid_path) = battle_core::physics::path::find_path(
+                            &self.config, map, &from_grid, &to_grid, true, &battle_core::physics::path::PathMode::Walk, &None
+                        ) {
+                            let world_path = grid_path.iter().map(|p| map.world_point_from_grid_point(*p)).collect();
+                            let paths = battle_core::types::WorldPaths::new(vec![battle_core::types::WorldPath::new(world_path)]);
+                            base_order = Some(battle_core::order::Order::SneakTo(paths, None));
+                        }
+                    }
+                }
                 
-                // 공격 위치가 있으면 마지막에 Defend(경계 태세) 오더 적용
-                if let Some(atk_pt) = attack_pts.last() {
+                // 템플릿으로 강제 배정되지 않은 경우에만 기존 클릭 위치 기반 오더 적용
+                if base_order.is_none() {
+                    // 공격 위치가 있으면 마지막에 Defend(경계 태세) 오더 적용
+                    if let Some(atk_pt) = attack_pts.last() {
                     base_order = Some(battle_core::order::Order::Defend(battle_core::types::Angle(0.0)));
                     
                     // 해당 공격 위치까지는 포복(SneakTo)으로 진입
@@ -219,6 +249,7 @@ impl Runner {
                         base_order = Some(battle_core::order::Order::MoveFastTo(paths, base_order.map(Box::new)));
                     }
                 }
+                } // [수정] if base_order.is_none() 블록의 닫는 괄호 추가
 
                 if let Some(order) = base_order {
                     let msg = battle_core::state::battle::message::BattleStateMessage::Soldier(
@@ -243,6 +274,11 @@ impl Runner {
                     })
                     .collect::<Vec<_>>();
                 let _ = self.output.send(combined_messages);
+
+                // [추가] 바이패스 명령 실행 시작 시 GUI 대기열에서 해당 명령 제거 신호 전송
+                let _ = self.output.send(vec![battle_core::message::OutputMessage::ClientState(
+                    battle_core::state::client::ClientStateMessage::RemoveChatTaskByCommand(command.to_string())
+                )]);
             }
 
             println!("==================================================");
@@ -499,13 +535,14 @@ impl Runner {
                         
                         // 기동 방식 결정을 위한 후보군 벡터 매칭 데이터베이스 정의
                         let action_candidates = vec![
-                            ("FlankTo", "우회 우회하라 측면공격 측면기동 빙돌아서 사이드로 빠져라"), // 우회 전용 기동 추가
+                            ("FlankTo", "우회 측면공격 측면기동"), // 우회 전용 기동 추가
                             ("SneakTo", "조용히 은밀 기동 진입 스닉 포복 포복이동 침투"),
-                            ("MoveFastTo", "신속 급속 기동 런 전력질주 빠른이동 달려가기"),
-                            ("MoveTo", "이동 간다 진격 목표 기동 도달"),
+                            ("MoveFastTo", "신속 급속 기동 런 전력질주 빠른이동"),
+                            ("MoveTo", "이동 진격"),
                             ("SuppressFire", "제압 제압사격 공격 타격 화력 사격"),
                             ("Defend", "방어 사수 대기 진지 방어태세"),
-                            ("Hide", "매복 은폐 숨기 은엄폐 몸을숨겨"),
+                            ("Hide", "매복 은폐 숨기 은엄폐"),
+                            ("RetreatTo", "후퇴 복귀 귀환 리스폰"),
                         ];
 
                         let mut best_variant = "MoveTo";
@@ -556,59 +593,66 @@ impl Runner {
                         let leader_pos = leader.world_point();
                         let mut target_point = battle_core::types::WorldPoint::new(leader_pos.x + 100.0, leader_pos.y + 100.0);
 
-                        // [우회 기동(FlankTo) 로직] 적군이나 건물을 중심축으로 삼아 사격선에서 이탈하는 경로 생성
-                        if best_variant == "FlankTo" {
-                            let mut axis_center = None;
+                        // [공격/이동/후퇴 판별 및 무조건적인 목표 좌표 강제 바인딩]
+                        if best_variant == "SuppressFire" {
+                            // 1. 공격: 맞든 안 맞든 무조건 가장 가까운 적 방향으로 좌표 세팅
                             let mut min_dist = std::f32::MAX;
-
-                            // 1. 가장 가까운 적을 중심축으로 설정
                             for enemy in self.battle_state.soldiers() {
                                 if enemy.side() != leader.side() && enemy.alive() {
                                     let dist = (enemy.world_point().to_vec2() - leader_pos.to_vec2()).length();
                                     if dist < min_dist {
                                         min_dist = dist;
-                                        axis_center = Some(enemy.world_point().to_vec2());
+                                        target_point = enemy.world_point();
                                     }
                                 }
                             }
-
-                            // 2. 적이 없으면 가장 가까운 건물을 중심축으로 설정
-                            if axis_center.is_none() {
-                                for interior in self.battle_state.map().interiors() {
-                                    let cx = interior.x() + interior.width() / 2.0;
-                                    let cy = interior.y() + interior.height() / 2.0;
-                                    let dist = (glam::Vec2::new(cx, cy) - leader_pos.to_vec2()).length();
+                            println!("[LLM Bridge] 사격(공격) 명령 감지: 적군 방향으로 무조건 제압 사격 좌표 지정");
+                        } else if best_variant == "RetreatTo" || has_return_intent {
+                            // 2. 후퇴/복귀: 리스폰 지역 또는 최초 체크포인트로 무조건 이동
+                            let mut found_cp = false;
+                            if let Some(cp) = self.checkpoints.read().unwrap().get(&res.squad_uuid) {
+                                target_point = *cp;
+                                found_cp = true;
+                            }
+                            if !found_cp {
+                                let mut min_dist = std::f32::MAX;
+                                for sz in self.battle_state.map().spawn_zones() {
+                                    let cz = battle_core::types::WorldPoint::new(sz.x() + sz.width() / 2.0, sz.y() + sz.height() / 2.0);
+                                    let dist = (cz.to_vec2() - leader_pos.to_vec2()).length();
                                     if dist < min_dist {
                                         min_dist = dist;
-                                        axis_center = Some(glam::Vec2::new(cx, cy));
+                                        target_point = cz;
                                     }
                                 }
                             }
+                            println!("[LLM Bridge] 후퇴/복귀 명령 감지: 리스폰 지역으로 강제 이동 좌표 지정");
+                        } else if best_variant == "FlankTo" || best_variant == "SneakTo" || best_variant == "MoveFastTo" || best_variant == "MoveTo" {
+                            // 3. 이동: 깃발(점령지) 쪽으로 무조건 이동
+                            let mut min_dist = std::f32::MAX;
+                            for flag in self.battle_state.map().flags() {
+                                let dist = (flag.position().to_vec2() - leader_pos.to_vec2()).length();
+                                if dist < min_dist {
+                                    min_dist = dist;
+                                    target_point = flag.position();
+                                }
+                            }
+                            println!("[LLM Bridge] 기동(이동) 명령 감지: 거점(Flag)으로 무조건 강제 이동 좌표 지정");
 
-                            if let Some(center) = axis_center {
-                                let dir = if (center - leader_pos.to_vec2()).length() > 0.1 {
-                                    (center - leader_pos.to_vec2()).normalize()
+                            // [우회 기동(FlankTo) 로직 보정] 목표가 정해졌다면 우회 동선 도출
+                            if best_variant == "FlankTo" {
+                                let dir = if (target_point.to_vec2() - leader_pos.to_vec2()).length() > 0.1 {
+                                    (target_point.to_vec2() - leader_pos.to_vec2()).normalize()
                                 } else {
                                     glam::Vec2::new(1.0, 0.0)
                                 };
-
-                                // 사격선(직선)에서 벗어나기 위해 90도 측면 벡터 도출 (분대 UUID 홀짝으로 좌우 분배)
-                                let perp_dir = if squad.leader().0 % 2 == 0 {
-                                    glam::Vec2::new(-dir.y, dir.x)
-                                } else {
-                                    glam::Vec2::new(dir.y, -dir.x)
-                                };
-
-                                // 사선에서 벗어나는 크기(약 50m = 166픽셀)만큼 측면으로 빠짐
+                                let perp_dir = if squad.leader().0 % 2 == 0 { glam::Vec2::new(-dir.y, dir.x) } else { glam::Vec2::new(dir.y, -dir.x) };
                                 let flank_vec = leader_pos.to_vec2() + perp_dir * 166.0 + dir * 50.0;
-                                
                                 let map_w = self.battle_state.map().visual_width() as f32 - 30.0;
                                 let map_h = self.battle_state.map().visual_height() as f32 - 30.0;
                                 target_point = battle_core::types::WorldPoint::new(
                                     flank_vec.x.clamp(30.0, map_w.max(30.0)),
                                     flank_vec.y.clamp(30.0, map_h.max(30.0))
                                 );
-                                println!("[LLM Bridge] 우회 기동 경로 계산 완료: 사선 이탈 및 측면 타격점 생성");
                             }
                         }
 
@@ -628,9 +672,10 @@ impl Runner {
                         let order = match best_variant {
                             "SneakTo" | "FlankTo" => battle_core::order::Order::SneakTo(paths, then_order),
                             "MoveFastTo" => battle_core::order::Order::MoveFastTo(paths, then_order),
-                            "SuppressFire" => battle_core::order::Order::SuppressFire(battle_core::types::WorldPoint::new(leader_pos.x + 200.0, leader_pos.y + 200.0)),
+                            "SuppressFire" => battle_core::order::Order::SuppressFire(target_point),
                             "Defend" => battle_core::order::Order::Defend(battle_core::types::Angle(0.0)),
                             "Hide" => battle_core::order::Order::Hide(battle_core::types::Angle(0.0)),
+                            "RetreatTo" => battle_core::order::Order::MoveFastTo(paths, then_order),
                             _ => battle_core::order::Order::MoveTo(paths, then_order),
                         };
 
@@ -648,6 +693,11 @@ impl Runner {
                         let runner_messages = vec![crate::runner::message::RunnerMessage::BattleState(battle_state_message)];
                         self.react(&runner_messages);
                         let _ = self.outputs(&runner_messages);
+                        
+                        // [추가] LLM 응답 후 실행 시작 시 GUI 대기열에서 해당 명령 제거 신호 전송
+                        let _ = self.output.send(vec![battle_core::message::OutputMessage::ClientState(
+                            battle_core::state::client::ClientStateMessage::RemoveChatTaskByCommand(res.command.clone())
+                        )]);
                     }
                 } else {
                     // PRD 7.1 절에 정의된 시스템 예외 상황(Failure) 등급 스키마 예외 제어 연동 규칙 적용
@@ -659,6 +709,11 @@ impl Runner {
                         self.output.send(vec![battle_core::message::OutputMessage::ClientState(
                             battle_core::state::client::ClientStateMessage::PlayInterfaceSound(battle_core::audio::Sound::Bip1)
                         )]).ok();
+
+                        // 실패 시에도 명령 대기열에서 제거할 수 있도록 추가
+                        let _ = self.output.send(vec![battle_core::message::OutputMessage::ClientState(
+                            battle_core::state::client::ClientStateMessage::RemoveChatTaskByCommand(res.command.clone())
+                        )]);
                     }
                 }
             } else {
