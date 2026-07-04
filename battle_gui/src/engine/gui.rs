@@ -123,7 +123,13 @@ impl Engine {
                             let btn_text = format!("{} (유사도: {:.2})", name, score);
                             // 버튼 클릭 시 해당 작전을 즉시 실행 (전술 확정)
                             if ui.button(btn_text).clicked() {
-                                messages.push(EngineMessage::SendChatCommand(id.clone()));
+                                let current_chat = self.gui_state.chat_input().trim();
+                                let final_cmd = if current_chat.is_empty() {
+                                    id.clone()
+                                } else {
+                                    format!("{} {}", current_chat, id)
+                                };
+                                messages.push(EngineMessage::SendChatCommand(final_cmd));
                                 messages.push(EngineMessage::GuiState(GuiStateMessage::SelectTemplate(None)));
                                 messages.push(EngineMessage::GuiState(GuiStateMessage::ToggleChatGui));
                             }
@@ -169,29 +175,10 @@ impl Engine {
     }
 
     pub fn update_task_gui(&mut self, ctx: &mut Context) -> GameResult<()> {
-        // [자동 해제 로직] 이동 도착 완료 또는 공격 상태 종료 시 Task 목록에서 자동 해제합니다.
-        let mut active_tasks = vec![];
-        for task in &self.gui_state.chat_tasks {
-            let mut is_active = false;
-            for sq_id in &task.2 {
-                if let Some(squad) = self.battle_state.squads().get(sq_id) {
-                    let leader_idx = squad.leader();
-                    if leader_idx.0 < self.battle_state.soldiers().len() {
-                        let leader = self.battle_state.soldier(leader_idx);
-                        // 이동 중이거나 공격(제압) 중이면 작전이 진행 중인 것으로 간주
-                        if matches!(leader.order(), battle_core::order::Order::MoveTo(_, _) | battle_core::order::Order::MoveFastTo(_, _) | battle_core::order::Order::SneakTo(_, _) | battle_core::order::Order::EngageSquad(_) | battle_core::order::Order::SuppressFire(_)) {
-                            is_active = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if is_active {
-                active_tasks.push(task.clone());
-            }
-        }
-        self.gui_state.chat_tasks = active_tasks;
-
+        // [버그 수정] 다중 Task가 동일한 분대를 참조할 때, 하나를 취소(Idle 강제 전환)하면 
+        // 나머지 Task들도 연쇄적으로 자동 삭제되는 치명적 버그를 해결하기 위해 
+        // 섣부른 자동 해제 로직을 전면 제거하고 플레이어의 수동 취소에 의존합니다.
+        
         if self.gui_state.chat_tasks.is_empty() {
             return Ok(());
         }
@@ -208,13 +195,11 @@ impl Engine {
         if needs_font_init {
             let mut fonts = ggegui::egui::FontDefinitions::default();
             
-            // 1. 운영체제(OS)별 자체 한글 폰트 동적 로드 (실패 시 내장 폰트 Fallback)
             fonts.font_data.insert(
                 "korean_font".to_owned(),
                 ggegui::egui::FontData::from_owned(load_system_korean_font()),
             );
 
-            // 2. Proportional 및 Monospace 모두 한글 폰트를 최우선(0순위)으로 강제 할당
             fonts.families.get_mut(&ggegui::egui::FontFamily::Proportional)
                 .unwrap()
                 .insert(0, "korean_font".to_owned());
@@ -224,7 +209,6 @@ impl Engine {
             
             egui_ctx.set_fonts(fonts);
 
-            // 3. 글로벌 텍스트 스타일 덮어쓰기 (모든 스타일을 안전한 Proportional/Monospace로 롤백)
             let mut style = (*egui_ctx.style()).clone();
             if let Some(text_style) = style.text_styles.get_mut(&ggegui::egui::TextStyle::Heading) {
                 text_style.family = ggegui::egui::FontFamily::Proportional;
@@ -255,27 +239,55 @@ impl Engine {
             .resizable(false)
             .anchor(ggegui::egui::Align2::LEFT_TOP, ggegui::egui::vec2(10.0, 50.0))
             .show(&egui_ctx, |ui| {
+                // [수정] 각 Task별로 독립적인 취소 처리를 위해 HashMap 사용
                 let mut to_remove = None;
-                for (id, cmd, squads) in &self.gui_state.chat_tasks {
+                let mut current_tasks = self.gui_state.chat_tasks.clone();
+                
+                for (idx, (id, cmd, squads)) in current_tasks.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(format!("명령: {}", cmd));
-                        if ui.button("❌ 취소").clicked() {
-                            to_remove = Some((*id, squads.clone()));
+                        // [수정] 고유한 버튼 ID를 위해 id를 직접 사용
+                        if ui.button(format!("❌ 취소##{}", id)).clicked() {
+                            // [수정] 클릭된 Task의 인덱스와 ID를 저장
+                            to_remove = Some((idx, *id, squads.clone()));
                         }
                     });
                 }
-                
-                if let Some((remove_id, target_squads)) = to_remove {
+             
+                if let Some((idx, remove_id, target_squads)) = to_remove {
+                    // [수정] 특정 Task만 제거하도록 인덱스 사용
                     messages.push(EngineMessage::GuiState(GuiStateMessage::RemoveChatTask(remove_id)));
-                    // 취소 시 해당 분대를 Idle 로 전환
-                    for sq_id in target_squads {
-                        let leader_idx = self.battle_state.squad(sq_id).leader();
-                        messages.push(EngineMessage::BattleState(
-                            battle_core::state::battle::message::BattleStateMessage::Soldier(
-                                leader_idx,
-                                battle_core::state::battle::message::SoldierMessage::SetOrder(battle_core::order::Order::Idle)
-                            )
-                        ));
+
+                    // [수정] target_squads가 비어있지 않은 경우에만 처리
+                    if !target_squads.is_empty() {
+                        for sq_id in target_squads {
+                            if let Some(squad) = self.battle_state.squads().get(&sq_id) {
+                                for member_idx in squad.members() {
+                                    messages.push(EngineMessage::BattleState(
+                                        battle_core::state::battle::message::BattleStateMessage::Soldier(
+                                            *member_idx,
+                                            battle_core::state::battle::message::SoldierMessage::SetOrder(battle_core::order::Order::Idle)
+                                        )
+                                    ));
+                                    messages.push(EngineMessage::BattleState(
+                                        battle_core::state::battle::message::BattleStateMessage::Soldier(
+                                            *member_idx,
+                                            battle_core::state::battle::message::SoldierMessage::SetBehavior(
+                                                battle_core::behavior::Behavior::Idle(battle_core::behavior::Body::Crouched)
+                                            )
+                                        )
+                                    ));
+                                    messages.push(EngineMessage::BattleState(
+                                        battle_core::state::battle::message::BattleStateMessage::Soldier(
+                                            *member_idx,
+                                            battle_core::state::battle::message::SoldierMessage::SetGesture(
+                                                battle_core::behavior::gesture::Gesture::Idle
+                                            )
+                                        )
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
             });

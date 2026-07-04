@@ -9,4 +9,6 @@ pub enum ClientStateMessage {
     // TODO : ajouter le WorldPoint
     PlayBattleSound(Sound),
     BattleStarted,
+    AddChatTask(String, Vec<crate::types::SquadUuid>),
+    RemoveChatTask(usize),
 }

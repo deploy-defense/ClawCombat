@@ -184,11 +184,12 @@ impl EventHandler<ggez::GameError> for Engine {
 
         // [Egui 플리커링 방지] Egui는 Immediate Mode GUI이므로 모든 UI 선언이 끝난 후
         // 마지막에 update(메쉬 및 텍스처 버퍼 생성)를 호출해야 프레임 지연 및 깜빡임이 발생하지 않습니다.
+        // Task GUI는 디버그 GUI와 완전히 독립적으로 매 프레임 업데이트
+        self.update_task_gui(ctx)?;
         self.update_debug_gui(ctx)?;
         self.update_intro_gui(ctx)?;
         self.update_end_gui(ctx)?;
         self.update_chat_gui(ctx)?;
-        self.update_task_gui(ctx)?; // [추가] Task 리스트 업데이트 
         self.egui_backend.update(ctx); 
         self.graphics.tick(ctx);
 

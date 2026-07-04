@@ -86,6 +86,7 @@ impl EmbeddingModel {
 pub struct TacticTemplate {
     pub id: String,
     pub name: String,
+    pub content: String,
     pub embedding: Vec<f32>,
 }
 
@@ -129,7 +130,7 @@ impl TacticManager {
                                     // 4. 임베딩 텍스트 품질 향상: 제목과 본문 내용을 결합하여 벡터화 진행
                                     let combined_text = format!("{} {}", name, content);
                                     if let Ok(embedding) = model.get_embedding(&combined_text) {
-                                        templates.push(TacticTemplate { id, name, embedding });
+                                        templates.push(TacticTemplate { id, name, content: content.clone(), embedding });
                                     }
                                 }
                                 Err(e) => {

@@ -51,6 +51,7 @@ pub struct AsyncTacticRequest {
     pub tactical_keywords: Vec<String>,
     pub squad_uuid: battle_core::types::SquadUuid,
     pub context_yaml: String,
+    pub injected_template_content: String,
 }
 
 pub struct AsyncTacticResponse {
@@ -133,7 +134,7 @@ impl Runner {
                     if stop_required_worker.load(Ordering::Relaxed) {
                         break;
                     }
-                    let prompt = format!("Context:\n{}\nKeywords: {:?}\nCommand: {}\nNote: 입력된 순서대로 다중 전술(예: 이동 후 공격 등)이 있다면 then_order를 활용하여 순차적으로 실행되게 JSON을 구성하세요.", req.context_yaml, req.tactical_keywords, req.command);
+                    let prompt = format!("Context:\n{}\nKeywords: {:?}\nCommand: {}\n{}\nNote: 입력된 순서대로 다중 전술(예: 이동 후 공격 등)이 있다면 then_order를 활용하여 순차적으로 실행되게 JSON을 구성하세요.", req.context_yaml, req.tactical_keywords, req.command, req.injected_template_content);
                     let response_json = worker_agent.generate_tactics(&prompt);
                     if let Ok(json_str) = response_json {
                         let res = AsyncTacticResponse {

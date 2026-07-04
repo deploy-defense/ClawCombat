@@ -96,6 +96,8 @@ pub struct GuiState {
     pub tactic_suggestions: Vec<(String, String, f32)>,
     pub chat_tasks: Vec<(usize, String, Vec<SquadUuid>)>,
     pub chat_task_counter: usize,
+    // Task UI 표시 여부를 독립적으로 관리 (디버그 GUI와 무관)
+    pub display_task_gui: bool,
 }
 
 impl GuiState {
@@ -148,7 +150,13 @@ impl GuiState {
             tactic_suggestions: vec![],
             chat_tasks: vec![],
             chat_task_counter: 0,
+            display_task_gui: true, // 기본값은 항상 표시
         }
+    }
+
+    // Task UI 표시 여부를 토글하는 메서드 (F12와 무관)
+    pub fn toggle_task_gui(&mut self) {
+        self.display_task_gui = !self.display_task_gui;
     }
 
     // [추가] 외부 엔진에서 현재 채팅창 활성화 상태를 조회할 수 있는 Getter 함수 제공
@@ -492,7 +500,12 @@ impl GuiState {
                 self.chat_tasks.push((self.chat_task_counter, command.clone(), squads.clone()));
             }
             GuiStateMessage::RemoveChatTask(id) => {
+                // [수정] 특정 ID를 가진 Task만 제거
                 self.chat_tasks.retain(|t| t.0 != *id);
+                // [수정] 제거 후 빈 배열이면 추가 정리
+                if self.chat_tasks.is_empty() {
+                    // 필요시 추가 정리 로직
+                }
             }
         }
     }

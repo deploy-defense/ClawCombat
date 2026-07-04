@@ -159,6 +159,7 @@ impl Engine {
                 messages.push(EngineMessage::TryLoadLastSave);
             }
             Some(VirtualKeyCode::F12) => {
+                // 디버그 GUI 토글만 수행하고, Task UI에는 영향을 주지 않음
                 messages.push(EngineMessage::GuiState(
                     GuiStateMessage::SetDisplayDebugGui(!self.gui_state.display_debug_gui()),
                 ));

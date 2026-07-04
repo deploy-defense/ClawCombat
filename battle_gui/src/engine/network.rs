@@ -64,13 +64,19 @@ impl Engine {
                                 })
                             }
                             ClientStateMessage::PlayInterfaceSound(sound) => {
-                                self.player.play(sound, self.config.global_volume, ctx)?
+                                self.player.play(&sound, self.config.global_volume, ctx)?
                             }
                             ClientStateMessage::PlayBattleSound(sound) => {
-                                self.player.play(sound, self.config.global_volume, ctx)?
+                                self.player.play(&sound, self.config.global_volume, ctx)?
                             }
                             ClientStateMessage::BattleStarted => {
                                 self.graphics.battle_started(ctx, self.battle_state.map())?;
+                            }
+                            ClientStateMessage::AddChatTask(command, squads) => {
+                                self.gui_state.react(&GuiStateMessage::AddChatTask(command.clone(), squads.clone()), ctx);
+                            }
+                            ClientStateMessage::RemoveChatTask(task_id) => {
+                                self.gui_state.react(&GuiStateMessage::RemoveChatTask(*task_id), ctx);
                             }
                         }
                     }

@@ -3,6 +3,7 @@ use battle_core::{
     state::battle::BattleState,
 };
 use crossbeam_channel::TryRecvError;
+use std::collections::HashMap; // [추가] HashMap 타입 임포트
 
 use super::{Runner, RunnerError, AsyncTacticRequest};
 
@@ -65,9 +66,25 @@ impl Runner {
         Ok(())
     }
 
-    fn process_chat_command(&mut self, command: &str) {
+    pub fn process_chat_command(&mut self, command: &str) {
         println!("==================================================");
         println!("[LLM Bridge] Received Command: {}", command);
+
+        // [신규 추가: Task 취소 명령 처리]
+        if command.starts_with("cancel") || command.starts_with("취소") {
+            let parts: Vec<&str> = command.split_whitespace().collect();
+            if let Some(task_id_str) = parts.get(1) {
+                if let Ok(task_id) = task_id_str.parse::<usize>() {
+                    // GUI로 Task 취소 메시지 전송
+                    let cancel_msg = battle_core::state::client::ClientStateMessage::RemoveChatTask(task_id);
+                    let _ = self.output.send(vec![battle_core::message::OutputMessage::ClientState(cancel_msg)]);
+                    println!("[LLM Bridge] Task ID {} 취소 요청 전송", task_id);
+                    return;
+                }
+            }
+            println!("[LLM Bridge] 취소 명령 형식 오류: cancel <TaskID>");
+            return;
+        }
 
         // [신규 추가: 직접 클릭 기반 명령어 LLM 바이패스 및 즉시 실행]
         // 입력 내용이 오직 클릭 기반(분대, 이동, 공격 토큰)으로만 구성되어 있다면 LLM을 생략하고 즉시 실행합니다.
@@ -118,6 +135,7 @@ impl Runner {
             let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
 
             // 섹터명을 월드 좌표로 복원하는 컨버터
+            // 섹터명을 월드 좌표로 복원하는 컨버터
             let sector_to_point = |sector: &str| -> Option<battle_core::types::WorldPoint> {
                 if sector.len() < 2 { return None; }
                 let letter = sector.chars().next().unwrap();
@@ -135,8 +153,9 @@ impl Runner {
 
             let mut messages_to_react = vec![];
 
-            for sq_id in target_squads {
-                let leader_idx = self.battle_state.squad(sq_id).leader();
+            // [수정] target_squads를 참조로 순회하여 소유권 이동 방지
+            for sq_id in &target_squads {
+                let leader_idx = self.battle_state.squad(*sq_id).leader();
                 if self.battle_state.soldier(leader_idx).side() != &battle_core::game::Side::A {
                     continue;
                 }
@@ -200,13 +219,25 @@ impl Runner {
 
             if !messages_to_react.is_empty() {
                 self.react(&messages_to_react);
+                
+                let combined_messages = messages_to_react
+                    .iter()
+                    .filter_map(|m| {
+                        if let crate::runner::message::RunnerMessage::BattleState(bs_msg) = m {
+                            Some(battle_core::message::OutputMessage::BattleState(bs_msg.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let _ = self.output.send(combined_messages);
             }
 
             println!("==================================================");
             return;
         }
 
-        // 1. Mecab-ko 형태소 분석기 초기화 (순수 Rust 구현체)
+        // 1. Mecab-ko 형태소 분석기 초기화
         let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let dic_path = current_dir.join("model").join("mecab-ko-dic-rust");
         std::env::set_var("MECAB_DICDIR", dic_path.to_string_lossy().into_owned());
@@ -221,6 +252,8 @@ impl Runner {
         
         // 2. 문장(Sentence) 및 어절(띄어쓰기) 단위 분리
         let mut tactical_keywords: Vec<String> = vec![];
+        let mut spatial_keywords: Vec<String> = vec![];  // 위치/방향 키워드
+        let mut target_keywords: Vec<String> = vec![];   // 대상 키워드
 
         let sentences: Vec<&str> = command
             .split(|c| c == '.' || c == '!' || c == '?')
@@ -238,6 +271,7 @@ impl Runner {
             }
 
             for mut word in raw_keywords {
+                // 형태소 분석 루프 (기존 로직 유지)
                 loop {
                     let tokens = tokenizer.tokenize(&word);
                     if tokens.is_empty() {
@@ -275,6 +309,7 @@ impl Runner {
                     break;
                 }
                 
+                // 핵심 키워드 추출 (기존 로직 개선)
                 let mut current_chunk = String::new();
                 for token in tokenizer.tokenize(&word) {
                     let text = token.surface.to_string();
@@ -290,15 +325,36 @@ impl Runner {
                         current_chunk.push_str(&text);
                     } else {
                         if !current_chunk.is_empty() {
-                            tactical_keywords.push(current_chunk.clone());
+                            // 3. 키워드 분류 (전술/위치/대상)
+                            let keyword = current_chunk.clone();
+                            tactical_keywords.push(keyword.clone());
+                            sentence_keywords.push(keyword.clone());
+                            
+                            // 위치/방향 키워드 감지
+                            if let Some(_) = self.spatial_references().get(&keyword) {
+                                spatial_keywords.push(keyword.clone()); // clone() 추가
+                            }
+                            // 대상 키워드 감지 (적, 분대, 깃발 등)
+                            if self.is_target_keyword(&keyword) {
+                                target_keywords.push(keyword); // 마지막 사용이므로 이동 허용
+                            }
+                            
                             current_chunk.clear();
                         }
                     }
                 }
                 
                 if !current_chunk.is_empty() {
-                    tactical_keywords.push(current_chunk.clone());
-                    sentence_keywords.push(current_chunk);
+                    let keyword = current_chunk.clone();
+                    tactical_keywords.push(keyword.clone());
+                    sentence_keywords.push(keyword.clone());
+                    
+                    if let Some(_) = self.spatial_references().get(&keyword) {
+                        spatial_keywords.push(keyword.clone()); // clone() 추가
+                    }
+                    if self.is_target_keyword(&keyword) {
+                        target_keywords.push(keyword); // 마지막 사용이므로 이동 허용
+                    }
                 }
             }
 
@@ -308,12 +364,17 @@ impl Runner {
             }));
         }
         
-        println!("[LLM Bridge] Extracted Keywords: {:?}", tactical_keywords);
-
+        // 4. LLM 프롬프트에 키워드 통합 (개선)
         let integrated_mapping_json = serde_json::json!({
             "command_total": command,
-            "split_analysis": sentences_json_mapping
+            "split_analysis": sentences_json_mapping,
+            "classified_keywords": {
+                "tactical": tactical_keywords,
+                "spatial": spatial_keywords,
+                "target": target_keywords
+            }
         });
+        
         if let Ok(json_log_string) = serde_json::to_string_pretty(&integrated_mapping_json) {
             println!("[LLM Bridge] Integrated Split Sentence-Keyword Mapping JSON:\n{}", json_log_string);
         }
@@ -362,12 +423,21 @@ impl Runner {
             context_yaml.push_str(&format!("    behavior: {}\n", leader.behavior()));
             context_yaml.push_str(&format!("    under_fire_stress: {}\n", leader.under_fire().value()));
 
+            // 사용자가 호출한 명령에 템플릿 ID 혹은 이름이 포함되어 있는지 매칭하여 마크다운 본문을 주입
+            let mut injected_template_content = String::new();
+            if let Some(tm) = &self.tactic_manager {
+                if let Some(template) = tm.templates.iter().find(|t| command.contains(&t.id) || command.contains(&t.name)) {
+                    injected_template_content = format!("\n[전술 템플릿 적용]\n사용자가 다음 전술 템플릿의 실행을 지시했습니다. 이 템플릿의 내용을 분석하여 JSON 명령으로 변환하세요:\n\n{}", template.content);
+                }
+            }
+
             // 메인 틱 스레드를 일체 방해하지 않고 비동기 수신용 큐로 오더 정보와 함께 인입 토스
             let req = AsyncTacticRequest {
                 command: command.to_string(),
                 tactical_keywords: tactical_keywords.clone(),
                 squad_uuid,
                 context_yaml,
+                injected_template_content,
             };
             if let Err(e) = self.async_llm_sender.send(req) {
                 println!("[LLM Bridge] 백그라운드 스레드 유입 에러: {}", e);
@@ -504,33 +574,9 @@ impl Runner {
                 if let Some(input_msg) = fallback_input_msg {
                     println!("[LLM Bridge] 전술 프롬프트 임베딩 보정 파이프라인 연산 성공: 엔진 큐 인입을 개시합니다.");
                     if let InputMessage::BattleState(battle_state_message) = input_msg {
-                        let frame_i = *self.battle_state.frame_i();
-                        let side_effects = self.battle_state.react(&battle_state_message, frame_i);
-                        
-                        let runner_messages: Vec<super::message::RunnerMessage> = side_effects
-                            .into_iter()
-                            .map(|se| match se {
-                                battle_core::state::battle::message::SideEffect::RefreshEntityAnimation(idx) => {
-                                    super::message::RunnerMessage::BattleState(
-                                        battle_core::state::battle::message::BattleStateMessage::Soldier(
-                                            idx,
-                                            battle_core::state::battle::message::SoldierMessage::SetBehavior(
-                                                self.battle_state.soldier(idx).behavior().clone()
-                                            )
-                                        )
-                                    )
-                                },
-                                battle_core::state::battle::message::SideEffect::SoldierFinishHisBehavior(idx, _then_order) => {
-                                    super::message::RunnerMessage::BattleState(
-                                        battle_core::state::battle::message::BattleStateMessage::Soldier(
-                                            idx,
-                                            battle_core::state::battle::message::SoldierMessage::ReachBehaviorStep
-                                        )
-                                    )
-                                }
-                            })
-                            .collect();
+                        let runner_messages = vec![crate::runner::message::RunnerMessage::BattleState(battle_state_message)];
                         self.react(&runner_messages);
+                        let _ = self.outputs(&runner_messages);
                     }
                 } else {
                     // PRD 7.1 절에 정의된 시스템 예외 상황(Failure) 등급 스키마 예외 제어 연동 규칙 적용
@@ -579,5 +625,32 @@ impl Runner {
         }
         
         ctx_str
+    }
+
+    fn spatial_references(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        map.insert("여기".to_string(), "self".to_string());
+        map.insert("저기".to_string(), "nearest_enemy".to_string());
+        map.insert("거기".to_string(), "cursor".to_string());
+        map.insert("북쪽".to_string(), "north".to_string());
+        map.insert("북동쪽".to_string(), "northeast".to_string());
+        map.insert("동쪽".to_string(), "east".to_string());
+        map.insert("남동쪽".to_string(), "southeast".to_string());
+        map.insert("남쪽".to_string(), "south".to_string());
+        map.insert("남서쪽".to_string(), "southwest".to_string());
+        map.insert("서쪽".to_string(), "west".to_string());
+        map.insert("북서쪽".to_string(), "northwest".to_string());
+        map.insert("전방".to_string(), "facing".to_string());
+        map.insert("후방".to_string(), "behind".to_string());
+        map.insert("좌측".to_string(), "left".to_string());
+        map.insert("우측".to_string(), "right".to_string());
+        map
+    }
+    
+    fn is_target_keyword(&self, keyword: &str) -> bool {
+        let target_keywords = vec![
+            "적", "분대", "깃발", "포인트", "전차", "보병", "기관총", "저격수"
+        ];
+        target_keywords.iter().any(|&k| keyword.contains(k))
     }
 }
